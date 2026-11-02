@@ -1,0 +1,43 @@
+name: Publish God's Eye
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 * * * *'   # hourly: fresh wildfire hotspots, satellite orbits every 6 h
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: pages
+        uses: actions/configure-pages@v6
+      - name: Refresh live data
+        env:
+          FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}
+        run: python3 scripts/refresh_data.py site
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
