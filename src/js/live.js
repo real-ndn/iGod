@@ -44,7 +44,8 @@ function satUpdate() {
     const e = lib.eciToEcf(pv.position, gmst); scratch.x = e.x * 1000; scratch.y = e.y * 1000; scratch.z = e.z * 1000;
     s.pt.position = scratch; s.pt.show = true; if (s.lb) s.lb.position = scratch;
   }
-  if (SAT.sel && SAT.sel.orbitAt && Date.now() - SAT.sel.orbitAt > 20000) drawOrbit(SAT.sel);
+  // redraw the orbit ring every 20 s, and at once when the clock jumps, so it always runs through the satellite
+  const sel = SAT.sel; if (sel && sel.orbitAt && (Date.now() - sel.orbitAt > 20000 || Math.abs(GE.time.now() - sel.orbitT) > 60000)) drawOrbit(sel);
   GE.scene.requestRender(); GE.emit('sats');
 }
 function drawOrbit(s) {
@@ -53,7 +54,7 @@ function drawOrbit(s) {
   const lib = SAT.lib, now = GE.time.now(), gmst = lib.gstime(new Date(now)), per = (2 * Math.PI) / s.rec.no, pts = [];
   for (let i = 0; i <= 160; i++) { const d = new Date(now + ((i / 160) * per - per * 0.25) * 60000), pv = lib.propagate(s.rec, d); if (pv && pv.position && typeof pv.position === 'object') { const e = lib.eciToEcf(pv.position, gmst); pts.push(new C.Cartesian3(e.x * 1000, e.y * 1000, e.z * 1000)); } }
   SAT.orbit.add({ positions: pts, width: 3, material: C.Material.fromType('PolylineGlow', { color: col(STYLE[s.group]?.c || '#8fd8ff', 0.9), glowPower: 0.18 }) });
-  s.orbitAt = Date.now(); GE.scene.requestRender();
+  s.orbitAt = Date.now(); s.orbitT = now; GE.scene.requestRender();
 }
 SAT.select = (s) => { SAT.sel = s; drawOrbit(s); if (SAT.selLb) { SAT.lbl.remove(SAT.selLb); if (SAT.selOwner) SAT.selOwner.lb = null; SAT.selLb = SAT.selOwner = null; } if (s && !s.lb) { SAT.selOwner = s; SAT.selLb = SAT.lbl.add({ position: s.pt.position, text: s.name, font: FONT, fillColor: C.Color.WHITE, outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(10, 0), horizontalOrigin: C.HorizontalOrigin.LEFT }); s.lb = SAT.selLb; } };
 SAT.find = (q) => { q = String(q).toLowerCase(); if (/\biss\b|space station|zarya/.test(q)) q = 'iss (zarya)'; return SAT.list.find((s) => s.name.toLowerCase() === q) || SAT.list.find((s) => s.name.toLowerCase().includes(q)); };
@@ -158,29 +159,32 @@ FL.enable = (on) => {
 FL.find = (q) => { q = String(q).toLowerCase().replace(/\s/g, ''); for (const f of FL.map.values()) if (f.cs.toLowerCase().replace(/\s/g, '') === q || f.reg.toLowerCase() === q) return f; return null; };
 
 // ── Earthquakes (USGS, M2.5+, past 7 days) ─────────
-const Q = (GE.live.quakes = { on: false, ds: null, timer: 0, n: 0 });
+const Q = (GE.live.quakes = { on: false, ds: null, timer: 0, n: 0, labels: [] });
+// magnitudes (M4.5 and up) go through the label engine too, so they never sit on top of place names
+GE.labelSources.push(() => (Q.on ? Q.labels : null));
 async function quakeLoad() {
   try {
     const d = await GE.fetchJSON(GE.CFG.url.quakes), now = Date.now(); Q.ds.entities.removeAll(); Q.n = 0;
+    const labels = [];
     for (const f of d.features || []) {
       const [lon, lat, depth] = f.geometry.coordinates, m = f.properties.mag ?? 0, t = f.properties.time, age = now - t;
-      const c = age < 3600e3 ? '#ff4d3a' : age < 86400e3 ? '#ff8f45' : '#ffc95c', a = age < 86400e3 ? 0.95 : 0.7;
+      const c = age < 3600e3 ? '#ff4d3a' : age < 86400e3 ? '#ff8f45' : '#ffc95c', a = age < 86400e3 ? 0.95 : 0.7, pos = C.Cartesian3.fromDegrees(lon, lat);
       const e = Q.ds.entities.add({
-        position: C.Cartesian3.fromDegrees(lon, lat), show: horizon.see(C.Cartesian3.fromDegrees(lon, lat)),
+        position: pos, show: horizon.see(pos),
         point: { pixelSize: 4 + Math.max(0, m - 2.5) * 2.6, color: col(c, a), outlineColor: col(c, 0.28), outlineWidth: m >= 5.5 ? 5 : 2, scaleByDistance: new C.NearFarScalar(1.5e5, 1.15, 2.2e7, 0.5), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6 },
-        label: m >= 4.5 ? { text: 'M' + m.toFixed(1), font: FONT, fillColor: col('#ffe2c2'), outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(0, -16), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, distanceDisplayCondition: new C.DistanceDisplayCondition(0, 9e6) } : undefined,
       });
       e.ge = { kind: 'quake', mag: m, place: f.properties.place || 'Earthquake', time: t, depth, url: f.properties.url, lat, lon, tsunami: f.properties.tsunami };
-      e.gePos = C.Cartesian3.fromDegrees(lon, lat);
+      e.gePos = pos;
+      if (m >= 4.5) labels.push({ t: 'q', name: 'M' + m.toFixed(1), lon, lat, pos, pri: -m * 2, reach: 9e6, ent: e, extra: { m } });
       Q.n++;
     }
-    horizon.kick(); GE.scene.requestRender(); GE.emit('quakes', Q.n);
+    Q.labels = labels; horizon.kick(); GE.labels.update && GE.labels.update(); GE.scene.requestRender(); GE.emit('quakes', Q.n);
   } catch (e) { console.warn(e); GE.toast('USGS earthquake feed did not load.'); }
 }
 Q.enable = (on) => {
   Q.on = on; clearInterval(Q.timer);
   if (!Q.ds) { Q.ds = new C.CustomDataSource('quakes'); GE.viewer.dataSources.add(Q.ds); }
-  Q.ds.show = on; if (!on) { GE.scene.requestRender(); return; }
+  Q.ds.show = on; GE.labels.update && GE.labels.update(); if (!on) { GE.scene.requestRender(); return; }
   quakeLoad(); Q.timer = setInterval(quakeLoad, 5 * 60000);
 };
 

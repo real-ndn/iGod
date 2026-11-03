@@ -776,7 +776,7 @@ GE.initGlobe = function () {
     const settled = now - RD.moved > 400 && (s.globe.tilesLoaded || now - RD.moved > 4000);
     const target = now - RD.moved < 60 ? 0 : settled ? 1 : RD.a;
     if (RD.a !== target) {
-      RD.a = target < RD.a ? Math.max(target, RD.a - 0.34) : Math.min(target, RD.a + 0.07);
+      RD.a = target < RD.a ? Math.max(target, RD.a - 0.34) : Math.min(target, RD.a + Math.max(0.07, (dt > 0 && dt < 1 ? dt : 0) * 2.5)); // ~0.4 s fade-in at any frame rate
       roads.alpha = RD.a; s.requestRender();
     } else if (RD.a < 1 && !RD.poll) {
       // waiting for tiles with nothing else drawing: look again shortly, or the fade-in would stall
@@ -1005,7 +1005,8 @@ function satUpdate() {
     const e = lib.eciToEcf(pv.position, gmst); scratch.x = e.x * 1000; scratch.y = e.y * 1000; scratch.z = e.z * 1000;
     s.pt.position = scratch; s.pt.show = true; if (s.lb) s.lb.position = scratch;
   }
-  if (SAT.sel && SAT.sel.orbitAt && Date.now() - SAT.sel.orbitAt > 20000) drawOrbit(SAT.sel);
+  // redraw the orbit ring every 20 s, and at once when the clock jumps, so it always runs through the satellite
+  const sel = SAT.sel; if (sel && sel.orbitAt && (Date.now() - sel.orbitAt > 20000 || Math.abs(GE.time.now() - sel.orbitT) > 60000)) drawOrbit(sel);
   GE.scene.requestRender(); GE.emit('sats');
 }
 function drawOrbit(s) {
@@ -1014,7 +1015,7 @@ function drawOrbit(s) {
   const lib = SAT.lib, now = GE.time.now(), gmst = lib.gstime(new Date(now)), per = (2 * Math.PI) / s.rec.no, pts = [];
   for (let i = 0; i <= 160; i++) { const d = new Date(now + ((i / 160) * per - per * 0.25) * 60000), pv = lib.propagate(s.rec, d); if (pv && pv.position && typeof pv.position === 'object') { const e = lib.eciToEcf(pv.position, gmst); pts.push(new C.Cartesian3(e.x * 1000, e.y * 1000, e.z * 1000)); } }
   SAT.orbit.add({ positions: pts, width: 3, material: C.Material.fromType('PolylineGlow', { color: col(STYLE[s.group]?.c || '#8fd8ff', 0.9), glowPower: 0.18 }) });
-  s.orbitAt = Date.now(); GE.scene.requestRender();
+  s.orbitAt = Date.now(); s.orbitT = now; GE.scene.requestRender();
 }
 SAT.select = (s) => { SAT.sel = s; drawOrbit(s); if (SAT.selLb) { SAT.lbl.remove(SAT.selLb); if (SAT.selOwner) SAT.selOwner.lb = null; SAT.selLb = SAT.selOwner = null; } if (s && !s.lb) { SAT.selOwner = s; SAT.selLb = SAT.lbl.add({ position: s.pt.position, text: s.name, font: FONT, fillColor: C.Color.WHITE, outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(10, 0), horizontalOrigin: C.HorizontalOrigin.LEFT }); s.lb = SAT.selLb; } };
 SAT.find = (q) => { q = String(q).toLowerCase(); if (/\biss\b|space station|zarya/.test(q)) q = 'iss (zarya)'; return SAT.list.find((s) => s.name.toLowerCase() === q) || SAT.list.find((s) => s.name.toLowerCase().includes(q)); };
@@ -1119,29 +1120,32 @@ FL.enable = (on) => {
 FL.find = (q) => { q = String(q).toLowerCase().replace(/\s/g, ''); for (const f of FL.map.values()) if (f.cs.toLowerCase().replace(/\s/g, '') === q || f.reg.toLowerCase() === q) return f; return null; };
 
 // ── Earthquakes (USGS, M2.5+, past 7 days) ─────────
-const Q = (GE.live.quakes = { on: false, ds: null, timer: 0, n: 0 });
+const Q = (GE.live.quakes = { on: false, ds: null, timer: 0, n: 0, labels: [] });
+// magnitudes (M4.5 and up) go through the label engine too, so they never sit on top of place names
+GE.labelSources.push(() => (Q.on ? Q.labels : null));
 async function quakeLoad() {
   try {
     const d = await GE.fetchJSON(GE.CFG.url.quakes), now = Date.now(); Q.ds.entities.removeAll(); Q.n = 0;
+    const labels = [];
     for (const f of d.features || []) {
       const [lon, lat, depth] = f.geometry.coordinates, m = f.properties.mag ?? 0, t = f.properties.time, age = now - t;
-      const c = age < 3600e3 ? '#ff4d3a' : age < 86400e3 ? '#ff8f45' : '#ffc95c', a = age < 86400e3 ? 0.95 : 0.7;
+      const c = age < 3600e3 ? '#ff4d3a' : age < 86400e3 ? '#ff8f45' : '#ffc95c', a = age < 86400e3 ? 0.95 : 0.7, pos = C.Cartesian3.fromDegrees(lon, lat);
       const e = Q.ds.entities.add({
-        position: C.Cartesian3.fromDegrees(lon, lat), show: horizon.see(C.Cartesian3.fromDegrees(lon, lat)),
+        position: pos, show: horizon.see(pos),
         point: { pixelSize: 4 + Math.max(0, m - 2.5) * 2.6, color: col(c, a), outlineColor: col(c, 0.28), outlineWidth: m >= 5.5 ? 5 : 2, scaleByDistance: new C.NearFarScalar(1.5e5, 1.15, 2.2e7, 0.5), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6 },
-        label: m >= 4.5 ? { text: 'M' + m.toFixed(1), font: FONT, fillColor: col('#ffe2c2'), outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(0, -16), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, distanceDisplayCondition: new C.DistanceDisplayCondition(0, 9e6) } : undefined,
       });
       e.ge = { kind: 'quake', mag: m, place: f.properties.place || 'Earthquake', time: t, depth, url: f.properties.url, lat, lon, tsunami: f.properties.tsunami };
-      e.gePos = C.Cartesian3.fromDegrees(lon, lat);
+      e.gePos = pos;
+      if (m >= 4.5) labels.push({ t: 'q', name: 'M' + m.toFixed(1), lon, lat, pos, pri: -m * 2, reach: 9e6, ent: e, extra: { m } });
       Q.n++;
     }
-    horizon.kick(); GE.scene.requestRender(); GE.emit('quakes', Q.n);
+    Q.labels = labels; horizon.kick(); GE.labels.update && GE.labels.update(); GE.scene.requestRender(); GE.emit('quakes', Q.n);
   } catch (e) { console.warn(e); GE.toast('USGS earthquake feed did not load.'); }
 }
 Q.enable = (on) => {
   Q.on = on; clearInterval(Q.timer);
   if (!Q.ds) { Q.ds = new C.CustomDataSource('quakes'); GE.viewer.dataSources.add(Q.ds); }
-  Q.ds.show = on; if (!on) { GE.scene.requestRender(); return; }
+  Q.ds.show = on; GE.labels.update && GE.labels.update(); if (!on) { GE.scene.requestRender(); return; }
   quakeLoad(); Q.timer = setInterval(quakeLoad, 5 * 60000);
 };
 
@@ -1322,6 +1326,8 @@ const STYLE = {
   m: (e) => (e.extra === 'ocean' ? { text: spaced(e.name), font: 'italic 500 14px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.92)', ow: 3 } : { text: e.name, font: 'italic 500 12.5px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.9)', ow: 3 }),
   // live natural events: sit just above their icon
   v: (e) => ({ text: e.name, font: '600 11.5px "Instrument Sans", system-ui, sans-serif', fill: e.extra.rx ? '#ffe3ad' : e.extra.cat === 'wildfires' ? '#ffcdb4' : '#e8eefc', ow: 3.5, oy: -17 }),
+  // earthquake magnitudes: just above the dot
+  q: (e) => ({ text: e.name, font: '600 11px "Instrument Sans", system-ui, sans-serif', fill: e.extra.m >= 6 ? '#ffb39a' : '#ffe2c2', ow: 3.5, oy: -10 }),
 };
 const meas = document.createElement('canvas').getContext('2d'), wcache = new Map();
 const textBox = (st) => { const k = st.font + '|' + st.text; let v = wcache.get(k); if (!v) { meas.font = st.font; const parts = st.text.split('\n'); v = { w: Math.max(...parts.map((p) => meas.measureText(p).width)), h: parts.length * 15 }; wcache.set(k, v); } return v; };
@@ -1359,8 +1365,8 @@ LB.update = () => {
     };
     // live layers claim their space first, nearest first, and only once you're regional (no wall of text from orbit)
     const live = [];
-    const reach = camH < 1.2e6 ? Math.max(4.2e5, camH * 1.5) : 0;
-    if (reach) for (const src of GE.labelSources) { const a = src(); if (a) for (const e of a) { if (!inView(e)) continue; const d = C.Cartesian3.distance(camPos, e.pos); if (d < reach) live.push([d + (e.pri || 0) * 6e4, e]); } }
+    const reach = camH < 1.2e6 ? Math.max(4.2e5, camH * 1.5) : 0; // an entry can carry its own reach (quakes read from orbit)
+    for (const src of GE.labelSources) { const a = src(); if (a) for (const e of a) { const lim = e.reach || reach; if (!lim || !inView(e)) continue; const d = C.Cartesian3.distance(camPos, e.pos); if (d < lim) live.push([d + (e.pri || 0) * 6e4, e]); } }
     live.sort((a, b) => a[0] - b[0]);
     let nLive = 0;
     for (const [, e] of live) {
@@ -1686,6 +1692,7 @@ K.dive = async (p) => {
 
 K.tour = async () => {
   K.stop(); K.set('tour'); document.body.classList.add('touring');
+  if (!GE.prefs.voice) GE.toast("Milo's voice is off. Turn it on in Settings to hear the tour.", 5000);
   const stops = GE.TOUR.map((n) => GE.PLACES.find((p) => p.name === n)).filter(Boolean);
   for (let i = 0; i < stops.length && K.mode === 'tour'; i++) {
     const p = stops[i]; GE.setCaption(`${i + 1} / ${stops.length} · ${p.sub}`, p.line); GE.milo && GE.milo.speak(p.line);
@@ -2178,7 +2185,7 @@ GE.ui.initPanels = () => {
   const pl = $('prefList'), units = document.createElement('div'); units.className = 'chips'; units.style.margin = '9px 0 4px';
   [['metric', 'Metric'], ['imperial', 'Imperial']].forEach(([k, t]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.dataset.u = k; b.textContent = t; b.onclick = () => { GE.prefs.units = k; GE.savePrefs(); units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === k)); GE.ui.status && GE.ui.status(); }; units.append(b); });
   units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === GE.prefs.units)); pl.append(units);
-  toggleRow(pl, { key: 'voice', label: "Milo's voice", desc: 'Milo speaks replies and tour lines', color: '#8fd8ff', apply: (on) => { if (!on) try { speechSynthesis.cancel(); } catch {} } });
+  toggleRow(pl, { key: 'voice', label: "Milo's voice", desc: 'Milo speaks replies and tour lines', color: '#8fd8ff', apply: (on) => { if (!on) GE.milo.stopVoice(); else GE.milo.speak("Milo's voice is on."); } });
   $('kIon').value = GE.keys.ion; $('kGoogle').value = GE.keys.google; $('kAnthropic').value = GE.keys.anthropic; $('kModel').value = GE.keys.model; $('kFirms').value = GE.keys.firms; $('kMly').value = GE.keys.mapillary;
   $('kSave').onclick = async () => {
     const before = { ...GE.keys };
@@ -2275,22 +2282,57 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let capT, rec = null, listening = false, busy = false, history = GE.store.get('milo.history', []);
 const state = (s) => (orb.dataset.s = s || '');
 
+// ── voice. iPhone and iPad ignore speech until a tap has opened it, drop a line spoken right after
+// cancel(), and can stall paused after the app was in the background. All three are handled here.
+const SS = 'speechSynthesis' in window ? window.speechSynthesis : null;
+const NOVELTY = /\b(eddy|flo|grandma|grandpa|reed|rocko|sandy|shelley|bad news|bells|boing|bubbles|cellos|good news|jester|organ|superstar|trinoids|whisper|wobble|zarvox|albert|junior|kathy|ralph|fred)\b/i;
+let voiceOpen = false, voiceWarned = false, voiceT = 0, lastCancel = -1e9;
+const cancelVoice = () => { lastCancel = performance.now(); try { SS && SS.cancel(); } catch {} };
+function pickVoice() {
+  const all = (SS && SS.getVoices()) || [], want = (navigator.language || 'en-US').toLowerCase();
+  const en = all.filter((v) => /^en/i.test(v.lang) && !NOVELTY.test(v.name));
+  const mine = en.filter((v) => v.lang.toLowerCase().replace('_', '-') === want), pool = mine.length ? mine : en;
+  return pool.find((v) => /premium|enhanced|natural/i.test(v.name)) || pool.find((v) => /samantha|daniel|aaron|evan|ava|zoe|karen|moira|google us english|google uk english male/i.test(v.name)) || pool.find((v) => v.default) || pool[0] || null;
+}
+// The first tap anywhere opens speech with a silent line, so tour lines and replies that arrive later can talk.
+function openVoice() {
+  if (voiceOpen || !SS) return;
+  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; SS.speak(u); voiceOpen = true; } catch {}
+}
+for (const t of ['touchend', 'pointerup', 'click', 'keydown']) addEventListener(t, openVoice, { capture: true, passive: true });
+// Safari's audio session: "playback" while Milo talks, so the voice isn't muted by the iPad's Silent setting
+const audioMode = (t) => { try { if (navigator.audioSession && navigator.audioSession.type !== t) navigator.audioSession.type = t; } catch {} };
+
 const milo = (GE.milo = {
   show(text, you) {
     cap.innerHTML = ''; if (you) { const y = document.createElement('span'); y.className = 'you'; y.textContent = '“' + you + '”'; cap.append(y); }
     cap.append(document.createTextNode(text)); cap.classList.add('on'); clearTimeout(capT);
     capT = setTimeout(() => cap.classList.remove('on'), Math.max(5000, text.length * 75));
   },
-  speak(text) {
-    if (!GE.prefs.voice || !('speechSynthesis' in window)) return;
+  speak(text, plain) {
+    if (!GE.prefs.voice || !SS || !text) return;
     try {
-      speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text);
-      const vs = speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang));
-      u.voice = vs.find((v) => /natural|premium|enhanced/i.test(v.name)) || vs.find((v) => /Daniel|Samantha|Aaron|Evan|Google US English|Google UK English Male/i.test(v.name)) || vs[0] || null;
-      u.rate = 1.03; u.pitch = 0.97; u.onstart = () => state('speak'); u.onend = u.onerror = () => state(listening ? 'listen' : busy ? 'think' : '');
-      speechSynthesis.speak(u);
-    } catch {}
+      const u = new SpeechSynthesisUtterance(text), v = plain ? null : pickVoice();
+      if (v) { u.voice = v; u.lang = v.lang; } else u.lang = navigator.language || 'en-US';
+      u.rate = 1.03; u.pitch = 0.97;
+      let began = false;
+      u.onstart = () => { began = true; state('speak'); };
+      u.onend = u.onerror = () => { if (milo.u === u) { milo.u = null; audioMode('auto'); } state(listening ? 'listen' : busy ? 'think' : ''); };
+      milo.u = u; // keep a reference: Safari can garbage-collect a line mid-sentence
+      audioMode('playback');
+      const go = () => { if (milo.u !== u) return; if (SS.paused) SS.resume(); SS.speak(u); };
+      if (SS.speaking || SS.pending) cancelVoice();
+      const wait = 300 - (performance.now() - lastCancel); // speaking right after cancel() is lost on iOS
+      if (wait > 0) setTimeout(go, wait); else go();
+      clearTimeout(voiceT);
+      voiceT = setTimeout(() => { // nothing came out: try the system default voice once, then say why
+        if (began || milo.u !== u || !GE.prefs.voice) return;
+        if (!plain && u.voice) return milo.speak(text, true);
+        if (!voiceWarned && GE.device !== 'desktop') { voiceWarned = true; GE.toast("Milo's voice didn't play. Check that sound is up and the iPad isn't muted, then tap the orb.", 7000); }
+      }, 2600);
+    } catch (e) { console.warn(e); }
   },
+  stopVoice() { milo.u = null; clearTimeout(voiceT); cancelVoice(); audioMode('auto'); },
   say(text, you) { milo.show(text, you); milo.speak(text); },
 });
 
@@ -2306,7 +2348,7 @@ form.addEventListener('submit', (e) => { e.preventDefault(); const t = input.val
 input.addEventListener('keydown', (e) => { if (e.key === 'Escape') form.hidden = true; });
 function listen() {
   try {
-    try { speechSynthesis.cancel(); } catch {}
+    milo.stopVoice(); // and hand the audio session back, so the microphone can open
     rec = new SR(); rec.lang = navigator.language || 'en-US'; rec.interimResults = true; rec.maxAlternatives = 1;
     let final = '';
     rec.onstart = () => { listening = true; state('listen'); milo.show('Listening…'); };
@@ -2376,7 +2418,7 @@ async function describe() {
 // ── local brain: fast, offline, no key
 async function local(text) {
   const t = text.toLowerCase().trim();
-  if (/^(stop|cancel|halt|enough|pause)\b/.test(t)) { GE.cam.stop(); try { speechSynthesis.cancel(); } catch {} return 'Stopped. You have the controls.'; }
+  if (/^(stop|cancel|halt|enough|pause)\b/.test(t)) { GE.cam.stop(); milo.stopVoice(); return 'Stopped. You have the controls.'; }
   if (/\btour\b|show me around/.test(t)) { GE.cam.tour(); return 'Rolling the tour. Touch anywhere to take over.'; }
   if (/\b(ride|board|fly with|follow)\b.*\b(iss|space station|hubble|satellite)/.test(t) || /^(the )?iss\b/.test(t)) { const n = await ride(/hubble/.test(t) ? 'hubble' : 'iss'); return n ? `Riding with ${n}. That's real orbital speed.` : 'I could not reach the satellite catalog.'; }
   let m = t.match(/(?:drive|route|directions|road trip)(?: me)?(?: from (.+?))? to (.+)$/);

@@ -155,7 +155,7 @@ GE.initGlobe = function () {
     const settled = now - RD.moved > 400 && (s.globe.tilesLoaded || now - RD.moved > 4000);
     const target = now - RD.moved < 60 ? 0 : settled ? 1 : RD.a;
     if (RD.a !== target) {
-      RD.a = target < RD.a ? Math.max(target, RD.a - 0.34) : Math.min(target, RD.a + 0.07);
+      RD.a = target < RD.a ? Math.max(target, RD.a - 0.34) : Math.min(target, RD.a + Math.max(0.07, (dt > 0 && dt < 1 ? dt : 0) * 2.5)); // ~0.4 s fade-in at any frame rate
       roads.alpha = RD.a; s.requestRender();
     } else if (RD.a < 1 && !RD.poll) {
       // waiting for tiles with nothing else drawing: look again shortly, or the fade-in would stall

@@ -70,7 +70,7 @@ GE.ui.initPanels = () => {
   const pl = $('prefList'), units = document.createElement('div'); units.className = 'chips'; units.style.margin = '9px 0 4px';
   [['metric', 'Metric'], ['imperial', 'Imperial']].forEach(([k, t]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.dataset.u = k; b.textContent = t; b.onclick = () => { GE.prefs.units = k; GE.savePrefs(); units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === k)); GE.ui.status && GE.ui.status(); }; units.append(b); });
   units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === GE.prefs.units)); pl.append(units);
-  toggleRow(pl, { key: 'voice', label: "Milo's voice", desc: 'Milo speaks replies and tour lines', color: '#8fd8ff', apply: (on) => { if (!on) try { speechSynthesis.cancel(); } catch {} } });
+  toggleRow(pl, { key: 'voice', label: "Milo's voice", desc: 'Milo speaks replies and tour lines', color: '#8fd8ff', apply: (on) => { if (!on) GE.milo.stopVoice(); else GE.milo.speak("Milo's voice is on."); } });
   $('kIon').value = GE.keys.ion; $('kGoogle').value = GE.keys.google; $('kAnthropic').value = GE.keys.anthropic; $('kModel').value = GE.keys.model; $('kFirms').value = GE.keys.firms; $('kMly').value = GE.keys.mapillary;
   $('kSave').onclick = async () => {
     const before = { ...GE.keys };

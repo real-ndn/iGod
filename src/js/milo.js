@@ -8,22 +8,57 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let capT, rec = null, listening = false, busy = false, history = GE.store.get('milo.history', []);
 const state = (s) => (orb.dataset.s = s || '');
 
+// ── voice. iPhone and iPad ignore speech until a tap has opened it, drop a line spoken right after
+// cancel(), and can stall paused after the app was in the background. All three are handled here.
+const SS = 'speechSynthesis' in window ? window.speechSynthesis : null;
+const NOVELTY = /\b(eddy|flo|grandma|grandpa|reed|rocko|sandy|shelley|bad news|bells|boing|bubbles|cellos|good news|jester|organ|superstar|trinoids|whisper|wobble|zarvox|albert|junior|kathy|ralph|fred)\b/i;
+let voiceOpen = false, voiceWarned = false, voiceT = 0, lastCancel = -1e9;
+const cancelVoice = () => { lastCancel = performance.now(); try { SS && SS.cancel(); } catch {} };
+function pickVoice() {
+  const all = (SS && SS.getVoices()) || [], want = (navigator.language || 'en-US').toLowerCase();
+  const en = all.filter((v) => /^en/i.test(v.lang) && !NOVELTY.test(v.name));
+  const mine = en.filter((v) => v.lang.toLowerCase().replace('_', '-') === want), pool = mine.length ? mine : en;
+  return pool.find((v) => /premium|enhanced|natural/i.test(v.name)) || pool.find((v) => /samantha|daniel|aaron|evan|ava|zoe|karen|moira|google us english|google uk english male/i.test(v.name)) || pool.find((v) => v.default) || pool[0] || null;
+}
+// The first tap anywhere opens speech with a silent line, so tour lines and replies that arrive later can talk.
+function openVoice() {
+  if (voiceOpen || !SS) return;
+  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; SS.speak(u); voiceOpen = true; } catch {}
+}
+for (const t of ['touchend', 'pointerup', 'click', 'keydown']) addEventListener(t, openVoice, { capture: true, passive: true });
+// Safari's audio session: "playback" while Milo talks, so the voice isn't muted by the iPad's Silent setting
+const audioMode = (t) => { try { if (navigator.audioSession && navigator.audioSession.type !== t) navigator.audioSession.type = t; } catch {} };
+
 const milo = (GE.milo = {
   show(text, you) {
     cap.innerHTML = ''; if (you) { const y = document.createElement('span'); y.className = 'you'; y.textContent = '“' + you + '”'; cap.append(y); }
     cap.append(document.createTextNode(text)); cap.classList.add('on'); clearTimeout(capT);
     capT = setTimeout(() => cap.classList.remove('on'), Math.max(5000, text.length * 75));
   },
-  speak(text) {
-    if (!GE.prefs.voice || !('speechSynthesis' in window)) return;
+  speak(text, plain) {
+    if (!GE.prefs.voice || !SS || !text) return;
     try {
-      speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text);
-      const vs = speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang));
-      u.voice = vs.find((v) => /natural|premium|enhanced/i.test(v.name)) || vs.find((v) => /Daniel|Samantha|Aaron|Evan|Google US English|Google UK English Male/i.test(v.name)) || vs[0] || null;
-      u.rate = 1.03; u.pitch = 0.97; u.onstart = () => state('speak'); u.onend = u.onerror = () => state(listening ? 'listen' : busy ? 'think' : '');
-      speechSynthesis.speak(u);
-    } catch {}
+      const u = new SpeechSynthesisUtterance(text), v = plain ? null : pickVoice();
+      if (v) { u.voice = v; u.lang = v.lang; } else u.lang = navigator.language || 'en-US';
+      u.rate = 1.03; u.pitch = 0.97;
+      let began = false;
+      u.onstart = () => { began = true; state('speak'); };
+      u.onend = u.onerror = () => { if (milo.u === u) { milo.u = null; audioMode('auto'); } state(listening ? 'listen' : busy ? 'think' : ''); };
+      milo.u = u; // keep a reference: Safari can garbage-collect a line mid-sentence
+      audioMode('playback');
+      const go = () => { if (milo.u !== u) return; if (SS.paused) SS.resume(); SS.speak(u); };
+      if (SS.speaking || SS.pending) cancelVoice();
+      const wait = 300 - (performance.now() - lastCancel); // speaking right after cancel() is lost on iOS
+      if (wait > 0) setTimeout(go, wait); else go();
+      clearTimeout(voiceT);
+      voiceT = setTimeout(() => { // nothing came out: try the system default voice once, then say why
+        if (began || milo.u !== u || !GE.prefs.voice) return;
+        if (!plain && u.voice) return milo.speak(text, true);
+        if (!voiceWarned && GE.device !== 'desktop') { voiceWarned = true; GE.toast("Milo's voice didn't play. Check that sound is up and the iPad isn't muted, then tap the orb.", 7000); }
+      }, 2600);
+    } catch (e) { console.warn(e); }
   },
+  stopVoice() { milo.u = null; clearTimeout(voiceT); cancelVoice(); audioMode('auto'); },
   say(text, you) { milo.show(text, you); milo.speak(text); },
 });
 
@@ -39,7 +74,7 @@ form.addEventListener('submit', (e) => { e.preventDefault(); const t = input.val
 input.addEventListener('keydown', (e) => { if (e.key === 'Escape') form.hidden = true; });
 function listen() {
   try {
-    try { speechSynthesis.cancel(); } catch {}
+    milo.stopVoice(); // and hand the audio session back, so the microphone can open
     rec = new SR(); rec.lang = navigator.language || 'en-US'; rec.interimResults = true; rec.maxAlternatives = 1;
     let final = '';
     rec.onstart = () => { listening = true; state('listen'); milo.show('Listening…'); };
@@ -109,7 +144,7 @@ async function describe() {
 // ── local brain: fast, offline, no key
 async function local(text) {
   const t = text.toLowerCase().trim();
-  if (/^(stop|cancel|halt|enough|pause)\b/.test(t)) { GE.cam.stop(); try { speechSynthesis.cancel(); } catch {} return 'Stopped. You have the controls.'; }
+  if (/^(stop|cancel|halt|enough|pause)\b/.test(t)) { GE.cam.stop(); milo.stopVoice(); return 'Stopped. You have the controls.'; }
   if (/\btour\b|show me around/.test(t)) { GE.cam.tour(); return 'Rolling the tour. Touch anywhere to take over.'; }
   if (/\b(ride|board|fly with|follow)\b.*\b(iss|space station|hubble|satellite)/.test(t) || /^(the )?iss\b/.test(t)) { const n = await ride(/hubble/.test(t) ? 'hubble' : 'iss'); return n ? `Riding with ${n}. That's real orbital speed.` : 'I could not reach the satellite catalog.'; }
   let m = t.match(/(?:drive|route|directions|road trip)(?: me)?(?: from (.+?))? to (.+)$/);

@@ -77,6 +77,7 @@ K.dive = async (p) => {
 
 K.tour = async () => {
   K.stop(); K.set('tour'); document.body.classList.add('touring');
+  if (!GE.prefs.voice) GE.toast("Milo's voice is off. Turn it on in Settings to hear the tour.", 5000);
   const stops = GE.TOUR.map((n) => GE.PLACES.find((p) => p.name === n)).filter(Boolean);
   for (let i = 0; i < stops.length && K.mode === 'tour'; i++) {
     const p = stops[i]; GE.setCaption(`${i + 1} / ${stops.length} · ${p.sub}`, p.line); GE.milo && GE.milo.speak(p.line);

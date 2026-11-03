@@ -69,6 +69,8 @@ const STYLE = {
   m: (e) => (e.extra === 'ocean' ? { text: spaced(e.name), font: 'italic 500 14px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.92)', ow: 3 } : { text: e.name, font: 'italic 500 12.5px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.9)', ow: 3 }),
   // live natural events: sit just above their icon
   v: (e) => ({ text: e.name, font: '600 11.5px "Instrument Sans", system-ui, sans-serif', fill: e.extra.rx ? '#ffe3ad' : e.extra.cat === 'wildfires' ? '#ffcdb4' : '#e8eefc', ow: 3.5, oy: -17 }),
+  // earthquake magnitudes: just above the dot
+  q: (e) => ({ text: e.name, font: '600 11px "Instrument Sans", system-ui, sans-serif', fill: e.extra.m >= 6 ? '#ffb39a' : '#ffe2c2', ow: 3.5, oy: -10 }),
 };
 const meas = document.createElement('canvas').getContext('2d'), wcache = new Map();
 const textBox = (st) => { const k = st.font + '|' + st.text; let v = wcache.get(k); if (!v) { meas.font = st.font; const parts = st.text.split('\n'); v = { w: Math.max(...parts.map((p) => meas.measureText(p).width)), h: parts.length * 15 }; wcache.set(k, v); } return v; };
@@ -106,8 +108,8 @@ LB.update = () => {
     };
     // live layers claim their space first, nearest first, and only once you're regional (no wall of text from orbit)
     const live = [];
-    const reach = camH < 1.2e6 ? Math.max(4.2e5, camH * 1.5) : 0;
-    if (reach) for (const src of GE.labelSources) { const a = src(); if (a) for (const e of a) { if (!inView(e)) continue; const d = C.Cartesian3.distance(camPos, e.pos); if (d < reach) live.push([d + (e.pri || 0) * 6e4, e]); } }
+    const reach = camH < 1.2e6 ? Math.max(4.2e5, camH * 1.5) : 0; // an entry can carry its own reach (quakes read from orbit)
+    for (const src of GE.labelSources) { const a = src(); if (a) for (const e of a) { const lim = e.reach || reach; if (!lim || !inView(e)) continue; const d = C.Cartesian3.distance(camPos, e.pos); if (d < lim) live.push([d + (e.pri || 0) * 6e4, e]); } }
     live.sort((a, b) => a[0] - b[0]);
     let nLive = 0;
     for (const [, e] of live) {
