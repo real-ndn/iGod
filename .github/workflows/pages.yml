@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # publish the built site to the gh-pages branch
   pages: write
   id-token: write
 
@@ -19,21 +19,56 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.pages.outputs.mode }}
     steps:
       - uses: actions/checkout@v7
+
+      # GitHub Pages serves this site from the gh-pages branch. If Settings → Pages →
+      # Source is ever switched to "GitHub Actions", this workflow deploys that way instead.
       - id: pages
-        uses: actions/configure-pages@v6
+        name: Check how Pages publishes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if info=$(gh api "repos/$GITHUB_REPOSITORY/pages" 2>/dev/null); then
+            mode=$(jq -r '.build_type // "legacy"' <<<"$info")
+            url=$(jq -r '.html_url // empty' <<<"$info")
+          else
+            mode=none; url=
+          fi
+          [ -n "$url" ] || url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Pages publishes via: $mode ($url)"
+
       - name: Refresh live data
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
-          PAGES_URL: ${{ steps.pages.outputs.base_url }}
+          PAGES_URL: ${{ steps.pages.outputs.url }}
         run: python3 scripts/refresh_data.py site
-      - uses: actions/upload-pages-artifact@v5
+
+      - name: Publish to the gh-pages branch
+        if: steps.pages.outputs.mode != 'workflow'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd site
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Publish ${GITHUB_SHA::7} with live data from $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+
+      - if: steps.pages.outputs.mode == 'workflow'
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
   deploy:
     needs: build
+    if: needs.build.outputs.mode == 'workflow'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

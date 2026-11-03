@@ -45,12 +45,11 @@ Add these in **Settings**. They're saved only in your browser.
 
 ## Live data pipeline
 
-`.github/workflows/pages.yml` publishes the site to GitHub Pages on every push, and again every hour. Each run, `scripts/refresh_data.py` saves fresh satellite orbits (from CelesTrak, at most every 6 hours) and wildfire hotspots (NASA FIRMS) into `site/data/`. The app then reads them from its own address, which avoids browser cross-origin blocks on those services.
+`.github/workflows/pages.yml` publishes the site on every push to `main`, and again every hour. Each run, `scripts/refresh_data.py` saves fresh satellite orbits (from CelesTrak, at most every 6 hours) and wildfire hotspots (NASA FIRMS) into `site/data/`. The workflow then pushes the finished site to the `gh-pages` branch, which GitHub Pages serves. The app reads those files from its own address, which avoids browser cross-origin blocks on those services.
 
-**One-time setup:**
+Nothing needs setting up. If you ever switch Settings → Pages → Source to **GitHub Actions**, the same workflow deploys that way instead.
 
-1. In the repo, go to Settings → Pages and set Source to **GitHub Actions**.
-2. For wildfires, go to Settings → Secrets and variables → Actions and add a secret named `FIRMS_MAP_KEY` holding your FIRMS map key.
+**Optional:** for wildfires, go to Settings → Secrets and variables → Actions and add a secret named `FIRMS_MAP_KEY` holding your FIRMS map key.
 
 ## Build
 
