@@ -291,6 +291,8 @@ body.drawing #globe { cursor: crosshair; }
 .tablet #cinema button { padding: 9px 14px 8px; font-size: 11px; }
 .tablet .swatch { width: 32px; height: 32px; }
 .tablet #cinema { bottom: calc(var(--sb) + 118px); }
+/* iPad full screen: Safari's own ✕ sits in the top-left corner, so the top bar steps right */
+.fs.tablet #top, .fs.phone #top { left: calc(var(--sl) + 62px); }
 @media (max-width: 1100px) { .brand b { display: none; } .brand { padding: 0 11px; } }
 @media (max-width: 1000px) { #status { display: none; } }
 .phone #drawBtn { display: none; }
@@ -515,9 +517,9 @@ GE.CFG = {
 GE.PLACES = [
   { name: 'Old Town Cottonwood', sub: 'Verde Valley, Arizona', lon: -112.0233, lat: 34.7487, v: [35, -26, 1700], line: 'Home. Old Town Cottonwood, where the Verde River runs through red-rock country.' },
   { name: 'Jerome', sub: 'Cleopatra Hill, Arizona', lon: -112.1138, lat: 34.7489, v: [250, -22, 1600], line: 'Jerome. A copper town hanging off Cleopatra Hill, a mile above the valley floor.' },
-  { name: 'Cathedral Rock', sub: 'Sedona, Arizona', lon: -111.7932, lat: 34.82, v: [20, -16, 2300], line: 'Cathedral Rock. Sedona sandstone at its most theatrical.' },
+  { name: 'Cathedral Rock', sub: 'Sedona, Arizona', lon: -111.7932, lat: 34.82, v: [30, -22, 3600], line: 'Cathedral Rock. Sedona sandstone at its most theatrical.' },
   { name: 'Grand Canyon', sub: 'Mather Point, Arizona', lon: -112.1078, lat: 36.0617, v: [0, -20, 9000], line: 'The Grand Canyon. A mile deep, and two billion years of rock on the walls.' },
-  { name: 'Horseshoe Bend', sub: 'Page, Arizona', lon: -111.5104, lat: 36.8791, v: [200, -40, 1900], line: 'Horseshoe Bend, where the Colorado River turns back on itself.' },
+  { name: 'Horseshoe Bend', sub: 'Page, Arizona', lon: -111.5132, lat: 36.8790, v: [300, -52, 2700], line: 'Horseshoe Bend, where the Colorado River turns back on itself.' },
   { name: 'Monument Valley', sub: 'Navajo Nation', lon: -110.101, lat: 36.9845, v: [300, -14, 7500], line: 'Monument Valley. The buttes everyone has seen in a western.' },
   { name: 'Mount Everest', sub: 'Nepal and China', lon: 86.925, lat: 27.9881, v: [200, -16, 17000], line: 'Everest. Eight thousand eight hundred and forty-nine meters, the top of the world.' },
   { name: 'Matterhorn', sub: 'Switzerland and Italy', lon: 7.6586, lat: 45.9763, v: [230, -14, 7000], line: 'The Matterhorn, carved into a pyramid by four glaciers.' },
@@ -540,6 +542,9 @@ GE.prefs = Object.assign({
 }, GE.store.get('prefs', {}));
 GE.savePrefs = () => GE.store.set('prefs', GE.prefs);
 const home = GE.store.get('home', null); if (home) GE.CFG.home = home;
+
+// live layers hand extra names to the label engine through these: each returns entries or null
+GE.labelSources = [];
 
 // ── tiny event bus
 GE.bus = new EventTarget();
@@ -693,18 +698,26 @@ GE.initGlobe = function () {
   const url = GE.CFG.url, L = v.imageryLayers;
   const credit = (t) => new C.Credit(t, true);
   GE.L = {};
-  GE.L.esri = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: url.esri, maximumLevel: 19, credit: credit('Imagery © Esri, Maxar, Earthstar Geographics, GIS User Community') }));
+  // Where Esri has no imagery (open ocean up close) it answers with a grey "Map data not yet available" tile.
+  // Recognise that tile and keep the coarser real imagery instead, as Cesium's own ArcGIS provider does.
+  const missing = new C.DiscardMissingTileImagePolicy({
+    missingImageUrl: GE.fill(url.esri, { z: 23, y: 0, x: 0 }),
+    pixelsToCheck: [new C.Cartesian2(0, 0), new C.Cartesian2(200, 20), new C.Cartesian2(20, 200), new C.Cartesian2(80, 110), new C.Cartesian2(160, 130)],
+    disableCheckIfAllPixelsAreTransparent: true,
+  });
+  GE.L.esri = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: url.esri, maximumLevel: 19, tileDiscardPolicy: missing, credit: credit('Imagery © Esri, Maxar, Earthstar Geographics, GIS User Community') }));
   GE.L.daily = null;
   GE.L.night = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: GE.fill(url.gibs, { layer: 'VIIRS_Black_Marble', date: '2016-01-01', lvl: 8, ext: 'png' }), maximumLevel: 8, credit: credit('Night lights: NASA Black Marble (GIBS)') }));
   GE.L.night.dayAlpha = 0; GE.L.night.nightAlpha = 1; GE.L.night.brightness = 1.35;
   GE.L.roads = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: url.roads, maximumLevel: 19, credit: credit('Labels © Esri') }));
 
-  // vision modes: one post-process pass, five looks
+  // vision modes: one post-process pass, five looks, plus moonlight for the night side
+  GE.nightLift = 0;
   GE.visionStage = s.postProcessStages.add(new C.PostProcessStage({
     name: 'ge_vision',
-    uniforms: { u_mode: () => GE.visionCode || 0, u_time: () => (performance.now() / 1000) % 600 },
+    uniforms: { u_mode: () => GE.visionCode || 0, u_time: () => (performance.now() / 1000) % 600, u_lift: () => GE.nightLift },
     fragmentShader: `
-      uniform sampler2D colorTexture; uniform float u_mode; uniform float u_time;
+      uniform sampler2D colorTexture; uniform sampler2D depthTexture; uniform float u_mode; uniform float u_time; uniform float u_lift;
       in vec2 v_textureCoordinates;
       float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
       vec3 ironbow(float t){
@@ -715,6 +728,12 @@ GE.initGlobe = function () {
       }
       void main(){
         vec2 uv = v_textureCoordinates; vec3 c = texture(colorTexture, uv).rgb;
+        // moonlight: after dark, lift the ground (never the sky) so terrain stays readable, with a cool cast
+        if (u_lift > 0.0 && texture(depthTexture, uv).r < 1.0) {
+          vec3 m = pow(max(c, vec3(0.0)), vec3(0.58)) * vec3(0.92, 0.97, 1.07);
+          c = mix(c, min(m, vec3(1.0)), u_lift);
+        }
+        if (u_mode < 0.5) { out_FragColor = vec4(c, 1.0); return; }
         float l = dot(c, vec3(0.299, 0.587, 0.114)); vec3 o = c;
         float vig = smoothstep(0.92, 0.32, length((uv - 0.5) * vec2(1.25, 1.0)));
         if (u_mode < 1.5) {            // night vision
@@ -733,6 +752,37 @@ GE.initGlobe = function () {
       }`,
   }));
   GE.visionStage.enabled = false;
+
+  // Per frame: moonlight strength, and road names out of the way of fast camera moves.
+  // Road names are baked into Esri's raster tiles; mid-flight Cesium stretches them from coarser tiles
+  // into giant blurry text, so they step aside and fade back once the view has loaded.
+  const RD = { a: 1, last: new C.Cartesian3(), t: 0, moved: -1e9, poll: 0 };
+  s.preRender.addEventListener(() => {
+    const now = performance.now(), k = cam.positionCartographic;
+    let lift = 0;
+    if (GE.prefs.sunEverywhere && GE.prefs.base !== 'night') {
+      const fade = 1 - GE.clamp((k.height - 8e4) / (6e5 - 8e4), 0, 1); // the planet from orbit keeps its real night side
+      if (fade > 0) { const alt = GE.sun.altAz(GE.time.now(), k.latitude / R, k.longitude / R).alt; lift = fade * GE.clamp((3 - alt) / 13, 0, 1) * 0.82; }
+    }
+    GE.nightLift = lift;
+    const want = (GE.visionCode || 0) > 0 || lift > 0.003;
+    if (GE.visionStage.enabled !== want) { GE.visionStage.enabled = want; s.requestRender(); }
+
+    const roads = GE.L.roads; if (!roads) return;
+    const dt = (now - RD.t) / 1000, p = cam.positionWC;
+    const speed = dt > 0 && dt < 0.6 ? C.Cartesian3.distance(p, RD.last) / dt / Math.max(40, k.height) : 0; // camera heights per second
+    C.Cartesian3.clone(p, RD.last); RD.t = now;
+    if (speed > 0.45 || (speed > 0.22 && now - RD.moved < 500)) RD.moved = now; // hysteresis: no flicker at the threshold
+    const settled = now - RD.moved > 400 && (s.globe.tilesLoaded || now - RD.moved > 4000);
+    const target = now - RD.moved < 60 ? 0 : settled ? 1 : RD.a;
+    if (RD.a !== target) {
+      RD.a = target < RD.a ? Math.max(target, RD.a - 0.34) : Math.min(target, RD.a + 0.07);
+      roads.alpha = RD.a; s.requestRender();
+    } else if (RD.a < 1 && !RD.poll) {
+      // waiting for tiles with nothing else drawing: look again shortly, or the fade-in would stall
+      RD.poll = setTimeout(() => { RD.poll = 0; s.requestRender(); }, 350);
+    }
+  });
 
   // keep going after a render error instead of freezing
   s.renderError.addEventListener((_, err) => {
@@ -787,7 +837,14 @@ GE.heightAt = async (lon, lat) => {
     if (GE.photoreal && GE.photoreal.show && s.sampleHeightMostDetailed) { const [r] = await Promise.race([s.sampleHeightMostDetailed([k]), new Promise((_, j) => setTimeout(j, 2500))]); if (r && isFinite(r.height)) return r.height; }
     const quick = s.globe.getHeight(k); if (quick != null && GE.terrainKind !== 'terrarium') return quick;
     if (GE.terrainKind === 'ion') { const [r] = await C.sampleTerrainMostDetailed(s.terrainProvider, [k]); return r.height || 0; }
-    if (GE.terrainKind === 'terrarium') return await Promise.race([GE.terra.sample(lon, lat, 14), new Promise((r) => setTimeout(() => r(quick || 0), 2500))]);
+    if (GE.terrainKind === 'terrarium') {
+      // fine sample first; if the network is busy, fall back to what's on screen, then a coarse (fast) tile
+      const late = Symbol(), fine = await Promise.race([GE.terra.sample(lon, lat, 14), new Promise((r) => setTimeout(() => r(late), 2500))]);
+      if (fine !== late && fine != null && !(fine === 0 && quick > 1)) return fine; // a failed tile reads as 0
+      if (quick != null) return quick;
+      const coarse = await Promise.race([GE.terra.sample(lon, lat, 9), new Promise((r) => setTimeout(() => r(null), 2000))]);
+      return coarse ?? 0;
+    }
   } catch {}
   return 0;
 };
@@ -867,7 +924,7 @@ GE.loadPhotoreal = async () => {
           float day = smoothstep(-0.14, 0.06, s);
           float gold = exp(-pow((s - 0.06) / 0.11, 2.0)) * day;
           vec3 c = material.diffuse;
-          c = mix(c * vec3(0.05, 0.07, 0.15), c, day);
+          c = mix(c * vec3(0.14, 0.17, 0.28), c, day);
           c = mix(c, c * vec3(1.16, 0.9, 0.66), gold * 0.55);
           material.diffuse = c;
         }`,
@@ -1070,14 +1127,15 @@ async function quakeLoad() {
       const [lon, lat, depth] = f.geometry.coordinates, m = f.properties.mag ?? 0, t = f.properties.time, age = now - t;
       const c = age < 3600e3 ? '#ff4d3a' : age < 86400e3 ? '#ff8f45' : '#ffc95c', a = age < 86400e3 ? 0.95 : 0.7;
       const e = Q.ds.entities.add({
-        position: C.Cartesian3.fromDegrees(lon, lat),
+        position: C.Cartesian3.fromDegrees(lon, lat), show: horizon.see(C.Cartesian3.fromDegrees(lon, lat)),
         point: { pixelSize: 4 + Math.max(0, m - 2.5) * 2.6, color: col(c, a), outlineColor: col(c, 0.28), outlineWidth: m >= 5.5 ? 5 : 2, scaleByDistance: new C.NearFarScalar(1.5e5, 1.15, 2.2e7, 0.5), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6 },
         label: m >= 4.5 ? { text: 'M' + m.toFixed(1), font: FONT, fillColor: col('#ffe2c2'), outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(0, -16), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, distanceDisplayCondition: new C.DistanceDisplayCondition(0, 9e6) } : undefined,
       });
       e.ge = { kind: 'quake', mag: m, place: f.properties.place || 'Earthquake', time: t, depth, url: f.properties.url, lat, lon, tsunami: f.properties.tsunami };
+      e.gePos = C.Cartesian3.fromDegrees(lon, lat);
       Q.n++;
     }
-    GE.scene.requestRender(); GE.emit('quakes', Q.n);
+    horizon.kick(); GE.scene.requestRender(); GE.emit('quakes', Q.n);
   } catch (e) { console.warn(e); GE.toast('USGS earthquake feed did not load.'); }
 }
 Q.enable = (on) => {
@@ -1087,46 +1145,79 @@ Q.enable = (on) => {
   quakeLoad(); Q.timer = setInterval(quakeLoad, 5 * 60000);
 };
 
+// Ground markers skip the depth test near the camera so terrain can't swallow them. From low down that
+// also let markers on the far side of the planet shine through the ground, so anything past the horizon hides.
+const horizon = (GE.live.horizon = (() => {
+  const occ = new C.EllipsoidalOccluder(C.Ellipsoid.WGS84, C.Cartesian3.ZERO);
+  let pending = false, hooked = false;
+  const see = (p) => { occ.cameraPosition = GE.camera.positionWC; return occ.isPointVisible(p); };
+  function run() {
+    pending = false; occ.cameraPosition = GE.camera.positionWC; let changed = false;
+    for (const L of [Q, EV]) if (L.on && L.ds) for (const e of L.ds.entities.values) { if (!e.gePos) continue; const v = occ.isPointVisible(e.gePos); if (e.show !== v) { e.show = v; changed = true; } }
+    if (FI.on && FI.pts) for (let i = 0, n = FI.pts.length; i < n; i++) { const p = FI.pts.get(i), v = occ.isPointVisible(p.position); if (p.show !== v) { p.show = v; changed = true; } }
+    if (changed) GE.scene.requestRender();
+  }
+  const kick = () => {
+    if (!GE.camera) return;
+    if (!hooked) { hooked = true; GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(kick); }
+    if (!pending) { pending = true; requestAnimationFrame(run); }
+  };
+  return { see, kick, run };
+})());
+
 // ── Natural events (NASA EONET: wildfires, volcanoes, storms, ice) ─────────
 const EV = (GE.live.events = { on: false, ds: null, timer: 0, n: 0 });
 const CAT = { wildfires: ['#ff7a3d', 'Wildfire'], volcanoes: ['#ff4d4d', 'Volcano'], severeStorms: ['#b39dff', 'Severe storm'], seaLakeIce: ['#8fe3ff', 'Sea and lake ice'], floods: ['#5aa9ff', 'Flood'], drought: ['#e0b46b', 'Drought'], dustHaze: ['#d9c19a', 'Dust and haze'], landslides: ['#c08a5a', 'Landslide'], snow: ['#eaf4ff', 'Snow'], tempExtremes: ['#ff9db0', 'Temperature extreme'], earthquakes: ['#ffc95c', 'Earthquake'], manmade: ['#c7cdd8', 'Man-made'], waterColor: ['#6fe0c0', 'Water color'] };
 const iconCache = {};
 function evIcon(cat) {
   if (iconCache[cat]) return iconCache[cat];
-  const [c] = CAT[cat] || ['#8fd8ff'], cv = document.createElement('canvas'); cv.width = cv.height = 48; const g = cv.getContext('2d');
+  const [c] = cat === 'rx' ? ['#f5b862'] : CAT[cat] || ['#8fd8ff'], cv = document.createElement('canvas'); cv.width = cv.height = 48; const g = cv.getContext('2d');
   const grd = g.createRadialGradient(24, 24, 2, 24, 24, 22); grd.addColorStop(0, c); grd.addColorStop(0.55, c + 'cc'); grd.addColorStop(1, c + '00');
   g.fillStyle = grd; g.beginPath(); g.arc(24, 24, 22, 0, 7); g.fill();
   g.fillStyle = '#0a0d14'; g.beginPath();
-  if (cat === 'wildfires') { g.moveTo(24, 12); g.bezierCurveTo(33, 21, 31, 33, 24, 35); g.bezierCurveTo(17, 33, 15, 25, 21, 19); g.bezierCurveTo(21, 24, 24, 25, 24, 12); }
+  if (cat === 'wildfires' || cat === 'rx') { g.moveTo(24, 12); g.bezierCurveTo(33, 21, 31, 33, 24, 35); g.bezierCurveTo(17, 33, 15, 25, 21, 19); g.bezierCurveTo(21, 24, 24, 25, 24, 12); }
   else if (cat === 'volcanoes') { g.moveTo(13, 34); g.lineTo(21, 17); g.lineTo(27, 17); g.lineTo(35, 34); }
   else if (cat === 'severeStorms') { g.arc(24, 24, 7, 0, 7); g.moveTo(31, 24); g.arc(24, 24, 11, 0, 4); }
   else { g.arc(24, 24, 5, 0, 7); }
   g.fill(); return (iconCache[cat] = cv);
 }
+// "Prescribed Fire KENDRICK RX-WRD CY26, Coconino, Arizona" → "Kendrick RX-WRD CY26" (the card keeps the full title)
+const shortTitle = (t) => {
+  let s = String(t || '').replace(/^\s*(prescribed fire|wildfire|wildfires|fire)\s+/i, '').split(',')[0].trim();
+  if (s && s === s.toUpperCase() && /[A-Z]{4}/.test(s)) s = s.toLowerCase().replace(/\b[a-z]{4,}\b/g, (w) => w[0].toUpperCase() + w.slice(1)).replace(/\b(rx|wrd|[a-z]{1,3}\d+)\b/g, (w) => w.toUpperCase());
+  return s.length > 34 ? s.slice(0, 32).trim() + '…' : s || String(t || 'Event');
+};
+EV.labels = [];
+// names go through the main label engine, so they never pile on top of each other or the place names
+GE.labelSources.push(() => (EV.on ? EV.labels : null));
 async function eventLoad() {
   try {
     const d = await GE.fetchJSON(GE.CFG.url.events, { timeout: 20000 }); EV.ds.entities.removeAll(); EV.n = 0;
+    const labels = [];
     for (const ev of d.events || []) {
       const cat = ev.categories?.[0]?.id || 'manmade', g = ev.geometry?.[ev.geometry.length - 1]; if (!g) continue;
       let lon, lat;
       if (g.type === 'Point') [lon, lat] = g.coordinates;
       else if (g.type === 'Polygon') { const ring = g.coordinates[0]; lon = ring.reduce((a, p) => a + p[0], 0) / ring.length; lat = ring.reduce((a, p) => a + p[1], 0) / ring.length; }
       else continue;
+      const rx = /^\s*prescribed/i.test(ev.title || ''), pos = C.Cartesian3.fromDegrees(lon, lat);
       const e = EV.ds.entities.add({
-        position: C.Cartesian3.fromDegrees(lon, lat),
-        billboard: { image: evIcon(cat), scale: 0.62, heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, scaleByDistance: new C.NearFarScalar(2e4, 1.1, 1.5e7, 0.5) },
-        label: { text: ev.title, font: FONT, fillColor: C.Color.WHITE, outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(0, -24), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, distanceDisplayCondition: new C.DistanceDisplayCondition(0, 1.2e6) },
+        position: pos, show: horizon.see(pos),
+        billboard: { image: evIcon(rx ? 'rx' : cat), scale: rx ? 0.52 : 0.62, heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, scaleByDistance: new C.NearFarScalar(2e4, 1.1, 1.5e7, 0.5) },
       });
-      e.ge = { kind: 'event', title: ev.title, cat, catName: (CAT[cat] || [0, ev.categories?.[0]?.title || 'Event'])[1], date: g.date, link: ev.sources?.[0]?.url || ev.link, lat, lon, mag: g.magnitudeValue, magUnit: g.magnitudeUnit };
+      e.gePos = pos;
+      e.ge = { kind: 'event', title: ev.title, cat, catName: rx ? 'Prescribed fire' : (CAT[cat] || [0, ev.categories?.[0]?.title || 'Event'])[1], date: g.date, link: ev.sources?.[0]?.url || ev.link, lat, lon, mag: g.magnitudeValue, magUnit: g.magnitudeUnit };
+      labels.push({ t: 'v', name: shortTitle(ev.title), lon, lat, pos, pri: rx ? 1 : 0, extra: { rx, cat }, ent: e });
       EV.n++;
     }
+    EV.labels = labels; horizon.kick(); GE.labels.update && GE.labels.update();
     GE.scene.requestRender(); GE.emit('events', EV.n);
   } catch (e) { console.warn(e); GE.toast('NASA EONET events did not load.'); }
 }
 EV.enable = (on) => {
   EV.on = on; clearInterval(EV.timer);
   if (!EV.ds) { EV.ds = new C.CustomDataSource('events'); GE.viewer.dataSources.add(EV.ds); }
-  EV.ds.show = on; if (!on) { GE.scene.requestRender(); return; }
+  EV.ds.show = on; GE.labels.update && GE.labels.update(); if (!on) { GE.scene.requestRender(); return; }
   eventLoad(); EV.timer = setInterval(eventLoad, 30 * 60000);
 };
 
@@ -1150,7 +1241,7 @@ async function fireLoad() {
     const f = r[2], c = f < 5 ? '#ffd166' : f < 20 ? '#ffa04d' : f < 80 ? '#ff6a3d' : '#ff2d55';
     FI.pts.add({ position: C.Cartesian3.fromDegrees(r[1], r[0], 0), pixelSize: GE.clamp(2.5 + Math.log2(1 + f) * 1.1, 2.5, 11), color: col(c, 0.92), scaleByDistance: new C.NearFarScalar(5e4, 1.4, 1.5e7, 0.55), disableDepthTestDistance: 1.2e7, id: { kind: 'fire', r } });
   }
-  FI.n = rows.length; FI.when = when; GE.scene.requestRender(); GE.emit('fires', FI.n);
+  FI.n = rows.length; FI.when = when; horizon.kick(); GE.scene.requestRender(); GE.emit('fires', FI.n);
 }
 FI.enable = (on) => {
   FI.on = on; clearInterval(FI.timer);
@@ -1229,6 +1320,8 @@ const STYLE = {
   k: (e) => ({ text: `▲ ${e.name}\n${F.elev(e.extra.elev)}`, font: '500 11.5px "Instrument Sans", system-ui, sans-serif', fill: '#ffe9bf', ow: 3 }),
   r: (e) => ({ text: /range|desert|plateau|plain|basin|lowland|valley|tundra/.test(e.extra) ? spaced(e.name) : e.name, font: 'italic 500 11.5px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(243,226,192,.9)', ow: 3 }),
   m: (e) => (e.extra === 'ocean' ? { text: spaced(e.name), font: 'italic 500 14px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.92)', ow: 3 } : { text: e.name, font: 'italic 500 12.5px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.9)', ow: 3 }),
+  // live natural events: sit just above their icon
+  v: (e) => ({ text: e.name, font: '600 11.5px "Instrument Sans", system-ui, sans-serif', fill: e.extra.rx ? '#ffe3ad' : e.extra.cat === 'wildfires' ? '#ffcdb4' : '#e8eefc', ow: 3.5, oy: -17 }),
 };
 const meas = document.createElement('canvas').getContext('2d'), wcache = new Map();
 const textBox = (st) => { const k = st.font + '|' + st.text; let v = wcache.get(k); if (!v) { meas.font = st.font; const parts = st.text.split('\n'); v = { w: Math.max(...parts.map((p) => meas.measureText(p).width)), h: parts.length * 15 }; wcache.set(k, v); } return v; };
@@ -1258,15 +1351,36 @@ LB.update = () => {
     const rect = cam.computeViewRectangle(C.Ellipsoid.WGS84);
     let w = -180, so = -90, ea = 180, no = 90; if (rect) { w = rect.west / R; so = rect.south / R; ea = rect.east / R; no = rect.north / R; }
     const wraps = ea < w, boxes = [], MAX = GE.isMobile ? 70 : 150;
+    const inView = (e) => !(e.lat < so || e.lat > no || (wraps ? e.lon < w && e.lon > ea : e.lon < w || e.lon > ea));
+    const onGround = (e) => { // close to the ground, lift labels onto the terrain so they sit on the right spot when tilted
+      if (camH >= 4e5) return e.pos;
+      const now = performance.now(); if (!e.hp || now - e.ht > 4000) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } }
+      return e.hp || e.pos;
+    };
+    // live layers claim their space first, nearest first, and only once you're regional (no wall of text from orbit)
+    const live = [];
+    const reach = camH < 1.2e6 ? Math.max(4.2e5, camH * 1.5) : 0;
+    if (reach) for (const src of GE.labelSources) { const a = src(); if (a) for (const e of a) { if (!inView(e)) continue; const d = C.Cartesian3.distance(camPos, e.pos); if (d < reach) live.push([d + (e.pri || 0) * 6e4, e]); } }
+    live.sort((a, b) => a[0] - b[0]);
+    let nLive = 0;
+    for (const [, e] of live) {
+      if (nLive >= (GE.isMobile ? 12 : 26)) break;
+      if (e.ent && e.ent.show === false) continue;
+      const pos = onGround(e); if (!occ.isPointVisible(pos)) continue;
+      const p = C.SceneTransforms.worldToWindowCoordinates(s, pos, scratch); if (!p || p.x < 0 || p.y < 0 || p.x > W || p.y > H) continue;
+      const st = STYLE[e.t](e), tb = textBox(st), bx = p.x - tb.w / 2 - 4, by = p.y + st.oy - tb.h - 3, bw = tb.w + 8, bh = tb.h + 6;
+      if (bx < 0 || bx + bw > W || by < 0) continue; // whole name on screen, or none of it
+      let hit = false; for (const b of boxes) if (bx < b[0] + b[2] && bx + bw > b[0] && by < b[1] + b[3] && by + bh > b[1]) { hit = true; break; } if (hit) continue;
+      boxes.push([bx, by, bw, bh], [p.x - 14, p.y - 14, 28, 28]); // the label and its icon
+      used.push([e, st, pos]); nLive++;
+    }
     let checked = 0;
     for (const e of E) {
       if (e.z > zNear + 0.6) break; // sorted by priority ≈ min zoom: nothing later can show
       if (used.length >= MAX || checked > 2600) break;
-      if (e.lat < so || e.lat > no || (wraps ? e.lon < w && e.lon > ea : e.lon < w || e.lon > ea)) continue;
+      if (!inView(e)) continue;
       checked++;
-      // close to the ground, lift labels onto the terrain so they sit on the right spot when tilted
-      let pos = e.pos;
-      if (camH < 4e5) { const now = performance.now(); if (!e.hp || now - e.ht > 4000) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } } if (e.hp) pos = e.hp; }
+      const pos = onGround(e);
       const dist = C.Cartesian3.distance(camPos, pos), zl = Math.log2(k / Math.max(dist, 1));
       if (e.z > zl + 0.45 || zl > (e.maxZ ?? 99) + 0.6) continue;
       if (!occ.isPointVisible(pos)) continue;
@@ -1285,7 +1399,7 @@ LB.update = () => {
     const u = used[i]; if (!u) { l.show = false; return; }
     const [e, st, pos] = u; l.position = pos;
     if (l._k !== e) { l._k = e; l.text = st.text; l.font = st.font; l.fillColor = C.Color.fromCssColorString(st.fill); l.outlineWidth = st.ow;
-      l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, 0); }
+      l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' || st.oy ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, st.oy || 0); }
     l.show = true;
   });
   LB.dpool.forEach((d, i) => { const u = usedD[i]; if (!u) { d.show = false; return; } const [e, pos] = u; d.position = pos; d.color = e.extra.cap ? C.Color.fromCssColorString('#f5b862') : C.Color.WHITE; d.pixelSize = e.extra.cap ? 6.5 : 5; d.show = true; });
@@ -1506,6 +1620,12 @@ function loop(fn) {
   raf = requestAnimationFrame(step);
 }
 const lerpAng = (a, b, t) => { let d = b - a; d = Math.atan2(Math.sin(d), Math.cos(d)); return a + d * t; };
+// How far a flown camera sits below the safe height over the terrain under it (0 when clear).
+// Target heights can arrive late or coarse, and a camera inside a hill renders black.
+const below = (margin = 70) => {
+  const k = cam().positionCartographic, g = GE.scene.globe.show ? GE.scene.globe.getHeight(k) : null;
+  return g == null ? 0 : Math.max(0, g * (GE.scene.verticalExaggeration || 1) + margin - k.height);
+};
 const wait = (ms) => new Promise((r) => (K.timer = setTimeout(r, ms)));
 GE.setCaption = (eyebrow, text) => { const el = GE.$('caption'); el.innerHTML = ''; if (!text) return; const s = document.createElement('small'); s.textContent = eyebrow || ''; el.append(s, document.createTextNode(text)); };
 
@@ -1542,7 +1662,8 @@ K.toPlace = (p, extra = {}) => K.flyTo({ lon: p.lon, lat: p.lat, heading: p.v ? 
 
 K.orbit = async (target, opts = {}) => {
   const c = target || GE.viewCenter(); if (!c) return;
-  const h = c.h ?? (await GE.heightAt(c.lon, c.lat)), center = C.Cartesian3.fromDegrees(c.lon, c.lat, h);
+  const h = c.h ?? (await GE.heightAt(c.lon, c.lat));
+  let center = C.Cartesian3.fromDegrees(c.lon, c.lat, h), lift = 0;
   const range = opts.range || GE.clamp(C.Cartesian3.distance(cam().positionWC, center), 400, 3e6);
   let heading = cam().heading; const pitch = opts.pitch ?? (cam().pitch < -1.15 ? -0.5 : cam().pitch);
   if (!opts.keep) K.stop(); K.set(opts.keep ? K.mode : 'orbit');
@@ -1550,6 +1671,7 @@ K.orbit = async (target, opts = {}) => {
   return new Promise((res) => loop((dt, t) => {
     if (K.mode !== mode) { res(false); return false; }
     heading += dt * (opts.speed || 0.1); cam().lookAt(center, new C.HeadingPitchRange(heading, pitch, range));
+    const d = below(); if (d > 0) { lift += d; center = C.Cartesian3.fromDegrees(c.lon, c.lat, h + lift); cam().lookAt(center, new C.HeadingPitchRange(heading, pitch, range)); }
     if (opts.ms && t - t0 > opts.ms) { cam().lookAtTransform(C.Matrix4.IDENTITY); res(true); return false; }
   }));
 };
@@ -1607,7 +1729,8 @@ const bearing = (a, b) => { const p1 = a[1] * R, p2 = b[1] * R, dl = (b[0] - a[0
 K.route = async (from, to) => {
   const d = await GE.fetchJSON(GE.fill(GE.CFG.url.osrm, { a: `${from.lon},${from.lat}`, b: `${to.lon},${to.lat}` }), { timeout: 15000 });
   const r = d.routes && d.routes[0]; if (!r) throw new Error('No route');
-  const coords = r.geometry.coordinates;
+  const coords = r.geometry.coordinates, snap = d.waypoints && d.waypoints[1] && d.waypoints[1].distance;
+  if (snap > 2000) GE.toast(`That pin is ${GE.fmt.dist(snap)} from the nearest road, so the drive ends there.`, 6500);
   if (GE.routeEnt) GE.viewer.entities.remove(GE.routeEnt);
   GE.routeEnt = GE.viewer.entities.add({ polyline: { positions: C.Cartesian3.fromDegreesArray(coords.flat()), width: 7, clampToGround: true, material: new C.PolylineGlowMaterialProperty({ glowPower: 0.25, taperPower: 1, color: C.Color.fromCssColorString('#f5b862') }) } });
   GE.route = { coords, distance: r.distance, duration: r.duration, from, to };
@@ -1615,22 +1738,32 @@ K.route = async (from, to) => {
   return GE.route;
 };
 K.flyRoute = async (route = GE.route) => {
-  if (!route) return; K.stop(); K.set('route');
+  if (!route) return; K.stop(); K.set('route'); document.body.classList.add('touring'); // cinematic, like the tour: any touch hands back control
   const c = route.coords, cum = [0];
   for (let i = 1; i < c.length; i++) cum.push(cum[i - 1] + hav(c[i - 1], c[i]));
   const total = cum[cum.length - 1]; if (total < 50) return K.stop();
   const at = (s) => { s = GE.clamp(s, 0, total); let lo = 0, hi = cum.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] <= s) lo = m; else hi = m; } const t = (s - cum[lo]) / Math.max(1e-6, cum[hi] - cum[lo]); return [GE.lerp(c[lo][0], c[hi][0], t), GE.lerp(c[lo][1], c[hi][1], t)]; };
   const dur = GE.clamp(total / 240, 16, 90) * 1000, h0 = await GE.heightAt(c[0][0], c[0][1]);
-  let hd = bearing(at(0), at(400)), h = h0, sampling = false, t0 = performance.now();
+  // Long drives are flown faster, so fly them higher: the ground stays readable and tiles keep up.
+  // Short ones stay at drone height (about 1.1 km behind and above the road).
+  const speed = total / (dur / 1000), range = GE.clamp(speed * 4, 1100, 42000), pitch = -GE.clamp(0.3 + (range - 1100) / 42000 * 0.45, 0.3, 0.75);
+  const look = Math.max(450, range * 0.4);
+  let hd = bearing(at(0), at(look)), h = h0, lift = 0, sampling = false, t0 = performance.now();
   GE.setCaption('Road flyover', `${route.from.name || 'Start'} → ${route.to.name || 'Destination'} · ${GE.fmt.dist(total)}`);
-  await K.flyTo({ lon: c[0][0], lat: c[0][1], h: h0, heading: hd / R, pitch: -17, range: 1100, duration: 2.6 }, true);
+  await K.flyTo({ lon: c[0][0], lat: c[0][1], h: h0, heading: hd / R, pitch: pitch / R, range, duration: 2.6 }, true);
   if (K.mode !== 'route') return; t0 = performance.now();
   loop((dt, t) => {
     if (K.mode !== 'route') return false;
     const u = GE.clamp((t - t0) / dur, 0, 1), e = u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2, s = e * total, p = at(s);
-    hd = lerpAng(hd, bearing(at(s - 150), at(s + 450)), 0.035);
-    if (!sampling) { sampling = true; GE.heightAt(p[0], p[1]).then((v) => { h = GE.lerp(h, v, 0.5); sampling = false; }); }
-    cam().lookAt(C.Cartesian3.fromDegrees(p[0], p[1], h), new C.HeadingPitchRange(hd, -0.3, 1100));
+    hd = lerpAng(hd, bearing(at(s - look * 0.3), at(s + look)), 0.035);
+    // what's on screen answers at once; the finer sample refines it when it lands
+    const quick = GE.scene.globe.getHeight(C.Cartographic.fromDegrees(p[0], p[1]));
+    if (quick != null) h = Math.max(h - 40, GE.lerp(h, quick * (GE.scene.verticalExaggeration || 1), 0.2));
+    if (!sampling && range < 6000) { sampling = true; GE.heightAt(p[0], p[1]).then((v) => { h = GE.lerp(h, v, 0.5); sampling = false; }); }
+    lift *= 0.985; // ease back down once past the high ground
+    const hpr = new C.HeadingPitchRange(hd, pitch, range);
+    cam().lookAt(C.Cartesian3.fromDegrees(p[0], p[1], h + lift), hpr);
+    const d = below(90); if (d > 0) { lift += d; cam().lookAt(C.Cartesian3.fromDegrees(p[0], p[1], h + lift), hpr); }
     if (u >= 1) { cam().lookAtTransform(C.Matrix4.IDENTITY); K.stop(); return false; }
   });
 };
@@ -1904,7 +2037,20 @@ GE.ui.initNav = () => {
   $('zin').onclick = () => GE.cam.zoom(0.42); $('zout').onclick = () => GE.cam.zoom(2.4);
   $('homeBtn').onclick = () => { const h = GE.PLACES.find((p) => p.name === GE.CFG.home.name) || { ...GE.CFG.home, v: [35, -28, 2200] }; GE.ui.showPlace({ name: GE.CFG.home.name, sub: GE.CFG.home.sub, lon: GE.CFG.home.lon, lat: GE.CFG.home.lat }); GE.cam.toPlace(h); };
   $('locBtn').onclick = () => GE.ui.locate();
-  $('fsBtn').onclick = () => { try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); } catch { GE.toast('Full screen is not available here.'); } };
+  // Full screen. On iPad, Safari puts its own ✕ in the top-left corner, so the top bar moves over for it.
+  // Opened from the Home Screen the app is already full screen, so the button goes away.
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  if (standalone) { $('fsBtn').hidden = true; document.documentElement.classList.add('standalone'); }
+  const fsSync = () => { document.documentElement.classList.toggle('fs', !!fsEl()); };
+  document.addEventListener('fullscreenchange', fsSync); document.addEventListener('webkitfullscreenchange', fsSync);
+  $('fsBtn').onclick = async () => {
+    const d = document, el = d.documentElement;
+    try {
+      if (fsEl()) await (d.exitFullscreen ? d.exitFullscreen() : d.webkitExitFullscreen());
+      else await (el.requestFullscreen ? el.requestFullscreen() : el.webkitRequestFullscreen());
+    } catch { GE.toast(GE.device === 'desktop' ? 'Full screen is not available here.' : 'For full screen, tap Share → Add to Home Screen, then open God’s Eye from there.', 6500); }
+  };
   addEventListener('keydown', (e) => { if (e.target.closest('input, select, textarea')) return; if (e.key === 'n' || e.key === 'N') GE.cam.north(); if (e.key === '/') { e.preventDefault(); q.focus(); } });
 };
 GE.ui.locate = () => {

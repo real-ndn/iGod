@@ -166,14 +166,15 @@ async function quakeLoad() {
       const [lon, lat, depth] = f.geometry.coordinates, m = f.properties.mag ?? 0, t = f.properties.time, age = now - t;
       const c = age < 3600e3 ? '#ff4d3a' : age < 86400e3 ? '#ff8f45' : '#ffc95c', a = age < 86400e3 ? 0.95 : 0.7;
       const e = Q.ds.entities.add({
-        position: C.Cartesian3.fromDegrees(lon, lat),
+        position: C.Cartesian3.fromDegrees(lon, lat), show: horizon.see(C.Cartesian3.fromDegrees(lon, lat)),
         point: { pixelSize: 4 + Math.max(0, m - 2.5) * 2.6, color: col(c, a), outlineColor: col(c, 0.28), outlineWidth: m >= 5.5 ? 5 : 2, scaleByDistance: new C.NearFarScalar(1.5e5, 1.15, 2.2e7, 0.5), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6 },
         label: m >= 4.5 ? { text: 'M' + m.toFixed(1), font: FONT, fillColor: col('#ffe2c2'), outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(0, -16), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, distanceDisplayCondition: new C.DistanceDisplayCondition(0, 9e6) } : undefined,
       });
       e.ge = { kind: 'quake', mag: m, place: f.properties.place || 'Earthquake', time: t, depth, url: f.properties.url, lat, lon, tsunami: f.properties.tsunami };
+      e.gePos = C.Cartesian3.fromDegrees(lon, lat);
       Q.n++;
     }
-    GE.scene.requestRender(); GE.emit('quakes', Q.n);
+    horizon.kick(); GE.scene.requestRender(); GE.emit('quakes', Q.n);
   } catch (e) { console.warn(e); GE.toast('USGS earthquake feed did not load.'); }
 }
 Q.enable = (on) => {
@@ -183,46 +184,79 @@ Q.enable = (on) => {
   quakeLoad(); Q.timer = setInterval(quakeLoad, 5 * 60000);
 };
 
+// Ground markers skip the depth test near the camera so terrain can't swallow them. From low down that
+// also let markers on the far side of the planet shine through the ground, so anything past the horizon hides.
+const horizon = (GE.live.horizon = (() => {
+  const occ = new C.EllipsoidalOccluder(C.Ellipsoid.WGS84, C.Cartesian3.ZERO);
+  let pending = false, hooked = false;
+  const see = (p) => { occ.cameraPosition = GE.camera.positionWC; return occ.isPointVisible(p); };
+  function run() {
+    pending = false; occ.cameraPosition = GE.camera.positionWC; let changed = false;
+    for (const L of [Q, EV]) if (L.on && L.ds) for (const e of L.ds.entities.values) { if (!e.gePos) continue; const v = occ.isPointVisible(e.gePos); if (e.show !== v) { e.show = v; changed = true; } }
+    if (FI.on && FI.pts) for (let i = 0, n = FI.pts.length; i < n; i++) { const p = FI.pts.get(i), v = occ.isPointVisible(p.position); if (p.show !== v) { p.show = v; changed = true; } }
+    if (changed) GE.scene.requestRender();
+  }
+  const kick = () => {
+    if (!GE.camera) return;
+    if (!hooked) { hooked = true; GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(kick); }
+    if (!pending) { pending = true; requestAnimationFrame(run); }
+  };
+  return { see, kick, run };
+})());
+
 // ── Natural events (NASA EONET: wildfires, volcanoes, storms, ice) ─────────
 const EV = (GE.live.events = { on: false, ds: null, timer: 0, n: 0 });
 const CAT = { wildfires: ['#ff7a3d', 'Wildfire'], volcanoes: ['#ff4d4d', 'Volcano'], severeStorms: ['#b39dff', 'Severe storm'], seaLakeIce: ['#8fe3ff', 'Sea and lake ice'], floods: ['#5aa9ff', 'Flood'], drought: ['#e0b46b', 'Drought'], dustHaze: ['#d9c19a', 'Dust and haze'], landslides: ['#c08a5a', 'Landslide'], snow: ['#eaf4ff', 'Snow'], tempExtremes: ['#ff9db0', 'Temperature extreme'], earthquakes: ['#ffc95c', 'Earthquake'], manmade: ['#c7cdd8', 'Man-made'], waterColor: ['#6fe0c0', 'Water color'] };
 const iconCache = {};
 function evIcon(cat) {
   if (iconCache[cat]) return iconCache[cat];
-  const [c] = CAT[cat] || ['#8fd8ff'], cv = document.createElement('canvas'); cv.width = cv.height = 48; const g = cv.getContext('2d');
+  const [c] = cat === 'rx' ? ['#f5b862'] : CAT[cat] || ['#8fd8ff'], cv = document.createElement('canvas'); cv.width = cv.height = 48; const g = cv.getContext('2d');
   const grd = g.createRadialGradient(24, 24, 2, 24, 24, 22); grd.addColorStop(0, c); grd.addColorStop(0.55, c + 'cc'); grd.addColorStop(1, c + '00');
   g.fillStyle = grd; g.beginPath(); g.arc(24, 24, 22, 0, 7); g.fill();
   g.fillStyle = '#0a0d14'; g.beginPath();
-  if (cat === 'wildfires') { g.moveTo(24, 12); g.bezierCurveTo(33, 21, 31, 33, 24, 35); g.bezierCurveTo(17, 33, 15, 25, 21, 19); g.bezierCurveTo(21, 24, 24, 25, 24, 12); }
+  if (cat === 'wildfires' || cat === 'rx') { g.moveTo(24, 12); g.bezierCurveTo(33, 21, 31, 33, 24, 35); g.bezierCurveTo(17, 33, 15, 25, 21, 19); g.bezierCurveTo(21, 24, 24, 25, 24, 12); }
   else if (cat === 'volcanoes') { g.moveTo(13, 34); g.lineTo(21, 17); g.lineTo(27, 17); g.lineTo(35, 34); }
   else if (cat === 'severeStorms') { g.arc(24, 24, 7, 0, 7); g.moveTo(31, 24); g.arc(24, 24, 11, 0, 4); }
   else { g.arc(24, 24, 5, 0, 7); }
   g.fill(); return (iconCache[cat] = cv);
 }
+// "Prescribed Fire KENDRICK RX-WRD CY26, Coconino, Arizona" → "Kendrick RX-WRD CY26" (the card keeps the full title)
+const shortTitle = (t) => {
+  let s = String(t || '').replace(/^\s*(prescribed fire|wildfire|wildfires|fire)\s+/i, '').split(',')[0].trim();
+  if (s && s === s.toUpperCase() && /[A-Z]{4}/.test(s)) s = s.toLowerCase().replace(/\b[a-z]{4,}\b/g, (w) => w[0].toUpperCase() + w.slice(1)).replace(/\b(rx|wrd|[a-z]{1,3}\d+)\b/g, (w) => w.toUpperCase());
+  return s.length > 34 ? s.slice(0, 32).trim() + '…' : s || String(t || 'Event');
+};
+EV.labels = [];
+// names go through the main label engine, so they never pile on top of each other or the place names
+GE.labelSources.push(() => (EV.on ? EV.labels : null));
 async function eventLoad() {
   try {
     const d = await GE.fetchJSON(GE.CFG.url.events, { timeout: 20000 }); EV.ds.entities.removeAll(); EV.n = 0;
+    const labels = [];
     for (const ev of d.events || []) {
       const cat = ev.categories?.[0]?.id || 'manmade', g = ev.geometry?.[ev.geometry.length - 1]; if (!g) continue;
       let lon, lat;
       if (g.type === 'Point') [lon, lat] = g.coordinates;
       else if (g.type === 'Polygon') { const ring = g.coordinates[0]; lon = ring.reduce((a, p) => a + p[0], 0) / ring.length; lat = ring.reduce((a, p) => a + p[1], 0) / ring.length; }
       else continue;
+      const rx = /^\s*prescribed/i.test(ev.title || ''), pos = C.Cartesian3.fromDegrees(lon, lat);
       const e = EV.ds.entities.add({
-        position: C.Cartesian3.fromDegrees(lon, lat),
-        billboard: { image: evIcon(cat), scale: 0.62, heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, scaleByDistance: new C.NearFarScalar(2e4, 1.1, 1.5e7, 0.5) },
-        label: { text: ev.title, font: FONT, fillColor: C.Color.WHITE, outlineColor: C.Color.BLACK, outlineWidth: 3, style: C.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new C.Cartesian2(0, -24), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, distanceDisplayCondition: new C.DistanceDisplayCondition(0, 1.2e6) },
+        position: pos, show: horizon.see(pos),
+        billboard: { image: evIcon(rx ? 'rx' : cat), scale: rx ? 0.52 : 0.62, heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: 2.5e6, scaleByDistance: new C.NearFarScalar(2e4, 1.1, 1.5e7, 0.5) },
       });
-      e.ge = { kind: 'event', title: ev.title, cat, catName: (CAT[cat] || [0, ev.categories?.[0]?.title || 'Event'])[1], date: g.date, link: ev.sources?.[0]?.url || ev.link, lat, lon, mag: g.magnitudeValue, magUnit: g.magnitudeUnit };
+      e.gePos = pos;
+      e.ge = { kind: 'event', title: ev.title, cat, catName: rx ? 'Prescribed fire' : (CAT[cat] || [0, ev.categories?.[0]?.title || 'Event'])[1], date: g.date, link: ev.sources?.[0]?.url || ev.link, lat, lon, mag: g.magnitudeValue, magUnit: g.magnitudeUnit };
+      labels.push({ t: 'v', name: shortTitle(ev.title), lon, lat, pos, pri: rx ? 1 : 0, extra: { rx, cat }, ent: e });
       EV.n++;
     }
+    EV.labels = labels; horizon.kick(); GE.labels.update && GE.labels.update();
     GE.scene.requestRender(); GE.emit('events', EV.n);
   } catch (e) { console.warn(e); GE.toast('NASA EONET events did not load.'); }
 }
 EV.enable = (on) => {
   EV.on = on; clearInterval(EV.timer);
   if (!EV.ds) { EV.ds = new C.CustomDataSource('events'); GE.viewer.dataSources.add(EV.ds); }
-  EV.ds.show = on; if (!on) { GE.scene.requestRender(); return; }
+  EV.ds.show = on; GE.labels.update && GE.labels.update(); if (!on) { GE.scene.requestRender(); return; }
   eventLoad(); EV.timer = setInterval(eventLoad, 30 * 60000);
 };
 
@@ -246,7 +280,7 @@ async function fireLoad() {
     const f = r[2], c = f < 5 ? '#ffd166' : f < 20 ? '#ffa04d' : f < 80 ? '#ff6a3d' : '#ff2d55';
     FI.pts.add({ position: C.Cartesian3.fromDegrees(r[1], r[0], 0), pixelSize: GE.clamp(2.5 + Math.log2(1 + f) * 1.1, 2.5, 11), color: col(c, 0.92), scaleByDistance: new C.NearFarScalar(5e4, 1.4, 1.5e7, 0.55), disableDepthTestDistance: 1.2e7, id: { kind: 'fire', r } });
   }
-  FI.n = rows.length; FI.when = when; GE.scene.requestRender(); GE.emit('fires', FI.n);
+  FI.n = rows.length; FI.when = when; horizon.kick(); GE.scene.requestRender(); GE.emit('fires', FI.n);
 }
 FI.enable = (on) => {
   FI.on = on; clearInterval(FI.timer);

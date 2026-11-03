@@ -67,6 +67,8 @@ const STYLE = {
   k: (e) => ({ text: `▲ ${e.name}\n${F.elev(e.extra.elev)}`, font: '500 11.5px "Instrument Sans", system-ui, sans-serif', fill: '#ffe9bf', ow: 3 }),
   r: (e) => ({ text: /range|desert|plateau|plain|basin|lowland|valley|tundra/.test(e.extra) ? spaced(e.name) : e.name, font: 'italic 500 11.5px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(243,226,192,.9)', ow: 3 }),
   m: (e) => (e.extra === 'ocean' ? { text: spaced(e.name), font: 'italic 500 14px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.92)', ow: 3 } : { text: e.name, font: 'italic 500 12.5px "Instrument Sans", system-ui, sans-serif', fill: 'rgba(170,220,255,.9)', ow: 3 }),
+  // live natural events: sit just above their icon
+  v: (e) => ({ text: e.name, font: '600 11.5px "Instrument Sans", system-ui, sans-serif', fill: e.extra.rx ? '#ffe3ad' : e.extra.cat === 'wildfires' ? '#ffcdb4' : '#e8eefc', ow: 3.5, oy: -17 }),
 };
 const meas = document.createElement('canvas').getContext('2d'), wcache = new Map();
 const textBox = (st) => { const k = st.font + '|' + st.text; let v = wcache.get(k); if (!v) { meas.font = st.font; const parts = st.text.split('\n'); v = { w: Math.max(...parts.map((p) => meas.measureText(p).width)), h: parts.length * 15 }; wcache.set(k, v); } return v; };
@@ -96,15 +98,36 @@ LB.update = () => {
     const rect = cam.computeViewRectangle(C.Ellipsoid.WGS84);
     let w = -180, so = -90, ea = 180, no = 90; if (rect) { w = rect.west / R; so = rect.south / R; ea = rect.east / R; no = rect.north / R; }
     const wraps = ea < w, boxes = [], MAX = GE.isMobile ? 70 : 150;
+    const inView = (e) => !(e.lat < so || e.lat > no || (wraps ? e.lon < w && e.lon > ea : e.lon < w || e.lon > ea));
+    const onGround = (e) => { // close to the ground, lift labels onto the terrain so they sit on the right spot when tilted
+      if (camH >= 4e5) return e.pos;
+      const now = performance.now(); if (!e.hp || now - e.ht > 4000) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } }
+      return e.hp || e.pos;
+    };
+    // live layers claim their space first, nearest first, and only once you're regional (no wall of text from orbit)
+    const live = [];
+    const reach = camH < 1.2e6 ? Math.max(4.2e5, camH * 1.5) : 0;
+    if (reach) for (const src of GE.labelSources) { const a = src(); if (a) for (const e of a) { if (!inView(e)) continue; const d = C.Cartesian3.distance(camPos, e.pos); if (d < reach) live.push([d + (e.pri || 0) * 6e4, e]); } }
+    live.sort((a, b) => a[0] - b[0]);
+    let nLive = 0;
+    for (const [, e] of live) {
+      if (nLive >= (GE.isMobile ? 12 : 26)) break;
+      if (e.ent && e.ent.show === false) continue;
+      const pos = onGround(e); if (!occ.isPointVisible(pos)) continue;
+      const p = C.SceneTransforms.worldToWindowCoordinates(s, pos, scratch); if (!p || p.x < 0 || p.y < 0 || p.x > W || p.y > H) continue;
+      const st = STYLE[e.t](e), tb = textBox(st), bx = p.x - tb.w / 2 - 4, by = p.y + st.oy - tb.h - 3, bw = tb.w + 8, bh = tb.h + 6;
+      if (bx < 0 || bx + bw > W || by < 0) continue; // whole name on screen, or none of it
+      let hit = false; for (const b of boxes) if (bx < b[0] + b[2] && bx + bw > b[0] && by < b[1] + b[3] && by + bh > b[1]) { hit = true; break; } if (hit) continue;
+      boxes.push([bx, by, bw, bh], [p.x - 14, p.y - 14, 28, 28]); // the label and its icon
+      used.push([e, st, pos]); nLive++;
+    }
     let checked = 0;
     for (const e of E) {
       if (e.z > zNear + 0.6) break; // sorted by priority ≈ min zoom: nothing later can show
       if (used.length >= MAX || checked > 2600) break;
-      if (e.lat < so || e.lat > no || (wraps ? e.lon < w && e.lon > ea : e.lon < w || e.lon > ea)) continue;
+      if (!inView(e)) continue;
       checked++;
-      // close to the ground, lift labels onto the terrain so they sit on the right spot when tilted
-      let pos = e.pos;
-      if (camH < 4e5) { const now = performance.now(); if (!e.hp || now - e.ht > 4000) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } } if (e.hp) pos = e.hp; }
+      const pos = onGround(e);
       const dist = C.Cartesian3.distance(camPos, pos), zl = Math.log2(k / Math.max(dist, 1));
       if (e.z > zl + 0.45 || zl > (e.maxZ ?? 99) + 0.6) continue;
       if (!occ.isPointVisible(pos)) continue;
@@ -123,7 +146,7 @@ LB.update = () => {
     const u = used[i]; if (!u) { l.show = false; return; }
     const [e, st, pos] = u; l.position = pos;
     if (l._k !== e) { l._k = e; l.text = st.text; l.font = st.font; l.fillColor = C.Color.fromCssColorString(st.fill); l.outlineWidth = st.ow;
-      l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, 0); }
+      l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' || st.oy ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, st.oy || 0); }
     l.show = true;
   });
   LB.dpool.forEach((d, i) => { const u = usedD[i]; if (!u) { d.show = false; return; } const [e, pos] = u; d.position = pos; d.color = e.extra.cap ? C.Color.fromCssColorString('#f5b862') : C.Color.WHITE; d.pixelSize = e.extra.cap ? 6.5 : 5; d.show = true; });

@@ -33,9 +33,9 @@ GE.CFG = {
 GE.PLACES = [
   { name: 'Old Town Cottonwood', sub: 'Verde Valley, Arizona', lon: -112.0233, lat: 34.7487, v: [35, -26, 1700], line: 'Home. Old Town Cottonwood, where the Verde River runs through red-rock country.' },
   { name: 'Jerome', sub: 'Cleopatra Hill, Arizona', lon: -112.1138, lat: 34.7489, v: [250, -22, 1600], line: 'Jerome. A copper town hanging off Cleopatra Hill, a mile above the valley floor.' },
-  { name: 'Cathedral Rock', sub: 'Sedona, Arizona', lon: -111.7932, lat: 34.82, v: [20, -16, 2300], line: 'Cathedral Rock. Sedona sandstone at its most theatrical.' },
+  { name: 'Cathedral Rock', sub: 'Sedona, Arizona', lon: -111.7932, lat: 34.82, v: [30, -22, 3600], line: 'Cathedral Rock. Sedona sandstone at its most theatrical.' },
   { name: 'Grand Canyon', sub: 'Mather Point, Arizona', lon: -112.1078, lat: 36.0617, v: [0, -20, 9000], line: 'The Grand Canyon. A mile deep, and two billion years of rock on the walls.' },
-  { name: 'Horseshoe Bend', sub: 'Page, Arizona', lon: -111.5104, lat: 36.8791, v: [200, -40, 1900], line: 'Horseshoe Bend, where the Colorado River turns back on itself.' },
+  { name: 'Horseshoe Bend', sub: 'Page, Arizona', lon: -111.5132, lat: 36.8790, v: [300, -52, 2700], line: 'Horseshoe Bend, where the Colorado River turns back on itself.' },
   { name: 'Monument Valley', sub: 'Navajo Nation', lon: -110.101, lat: 36.9845, v: [300, -14, 7500], line: 'Monument Valley. The buttes everyone has seen in a western.' },
   { name: 'Mount Everest', sub: 'Nepal and China', lon: 86.925, lat: 27.9881, v: [200, -16, 17000], line: 'Everest. Eight thousand eight hundred and forty-nine meters, the top of the world.' },
   { name: 'Matterhorn', sub: 'Switzerland and Italy', lon: 7.6586, lat: 45.9763, v: [230, -14, 7000], line: 'The Matterhorn, carved into a pyramid by four glaciers.' },
@@ -58,6 +58,9 @@ GE.prefs = Object.assign({
 }, GE.store.get('prefs', {}));
 GE.savePrefs = () => GE.store.set('prefs', GE.prefs);
 const home = GE.store.get('home', null); if (home) GE.CFG.home = home;
+
+// live layers hand extra names to the label engine through these: each returns entries or null
+GE.labelSources = [];
 
 // ── tiny event bus
 GE.bus = new EventTarget();

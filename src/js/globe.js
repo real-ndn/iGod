@@ -77,18 +77,26 @@ GE.initGlobe = function () {
   const url = GE.CFG.url, L = v.imageryLayers;
   const credit = (t) => new C.Credit(t, true);
   GE.L = {};
-  GE.L.esri = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: url.esri, maximumLevel: 19, credit: credit('Imagery © Esri, Maxar, Earthstar Geographics, GIS User Community') }));
+  // Where Esri has no imagery (open ocean up close) it answers with a grey "Map data not yet available" tile.
+  // Recognise that tile and keep the coarser real imagery instead, as Cesium's own ArcGIS provider does.
+  const missing = new C.DiscardMissingTileImagePolicy({
+    missingImageUrl: GE.fill(url.esri, { z: 23, y: 0, x: 0 }),
+    pixelsToCheck: [new C.Cartesian2(0, 0), new C.Cartesian2(200, 20), new C.Cartesian2(20, 200), new C.Cartesian2(80, 110), new C.Cartesian2(160, 130)],
+    disableCheckIfAllPixelsAreTransparent: true,
+  });
+  GE.L.esri = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: url.esri, maximumLevel: 19, tileDiscardPolicy: missing, credit: credit('Imagery © Esri, Maxar, Earthstar Geographics, GIS User Community') }));
   GE.L.daily = null;
   GE.L.night = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: GE.fill(url.gibs, { layer: 'VIIRS_Black_Marble', date: '2016-01-01', lvl: 8, ext: 'png' }), maximumLevel: 8, credit: credit('Night lights: NASA Black Marble (GIBS)') }));
   GE.L.night.dayAlpha = 0; GE.L.night.nightAlpha = 1; GE.L.night.brightness = 1.35;
   GE.L.roads = L.addImageryProvider(new C.UrlTemplateImageryProvider({ url: url.roads, maximumLevel: 19, credit: credit('Labels © Esri') }));
 
-  // vision modes: one post-process pass, five looks
+  // vision modes: one post-process pass, five looks, plus moonlight for the night side
+  GE.nightLift = 0;
   GE.visionStage = s.postProcessStages.add(new C.PostProcessStage({
     name: 'ge_vision',
-    uniforms: { u_mode: () => GE.visionCode || 0, u_time: () => (performance.now() / 1000) % 600 },
+    uniforms: { u_mode: () => GE.visionCode || 0, u_time: () => (performance.now() / 1000) % 600, u_lift: () => GE.nightLift },
     fragmentShader: `
-      uniform sampler2D colorTexture; uniform float u_mode; uniform float u_time;
+      uniform sampler2D colorTexture; uniform sampler2D depthTexture; uniform float u_mode; uniform float u_time; uniform float u_lift;
       in vec2 v_textureCoordinates;
       float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
       vec3 ironbow(float t){
@@ -99,6 +107,12 @@ GE.initGlobe = function () {
       }
       void main(){
         vec2 uv = v_textureCoordinates; vec3 c = texture(colorTexture, uv).rgb;
+        // moonlight: after dark, lift the ground (never the sky) so terrain stays readable, with a cool cast
+        if (u_lift > 0.0 && texture(depthTexture, uv).r < 1.0) {
+          vec3 m = pow(max(c, vec3(0.0)), vec3(0.58)) * vec3(0.92, 0.97, 1.07);
+          c = mix(c, min(m, vec3(1.0)), u_lift);
+        }
+        if (u_mode < 0.5) { out_FragColor = vec4(c, 1.0); return; }
         float l = dot(c, vec3(0.299, 0.587, 0.114)); vec3 o = c;
         float vig = smoothstep(0.92, 0.32, length((uv - 0.5) * vec2(1.25, 1.0)));
         if (u_mode < 1.5) {            // night vision
@@ -117,6 +131,37 @@ GE.initGlobe = function () {
       }`,
   }));
   GE.visionStage.enabled = false;
+
+  // Per frame: moonlight strength, and road names out of the way of fast camera moves.
+  // Road names are baked into Esri's raster tiles; mid-flight Cesium stretches them from coarser tiles
+  // into giant blurry text, so they step aside and fade back once the view has loaded.
+  const RD = { a: 1, last: new C.Cartesian3(), t: 0, moved: -1e9, poll: 0 };
+  s.preRender.addEventListener(() => {
+    const now = performance.now(), k = cam.positionCartographic;
+    let lift = 0;
+    if (GE.prefs.sunEverywhere && GE.prefs.base !== 'night') {
+      const fade = 1 - GE.clamp((k.height - 8e4) / (6e5 - 8e4), 0, 1); // the planet from orbit keeps its real night side
+      if (fade > 0) { const alt = GE.sun.altAz(GE.time.now(), k.latitude / R, k.longitude / R).alt; lift = fade * GE.clamp((3 - alt) / 13, 0, 1) * 0.82; }
+    }
+    GE.nightLift = lift;
+    const want = (GE.visionCode || 0) > 0 || lift > 0.003;
+    if (GE.visionStage.enabled !== want) { GE.visionStage.enabled = want; s.requestRender(); }
+
+    const roads = GE.L.roads; if (!roads) return;
+    const dt = (now - RD.t) / 1000, p = cam.positionWC;
+    const speed = dt > 0 && dt < 0.6 ? C.Cartesian3.distance(p, RD.last) / dt / Math.max(40, k.height) : 0; // camera heights per second
+    C.Cartesian3.clone(p, RD.last); RD.t = now;
+    if (speed > 0.45 || (speed > 0.22 && now - RD.moved < 500)) RD.moved = now; // hysteresis: no flicker at the threshold
+    const settled = now - RD.moved > 400 && (s.globe.tilesLoaded || now - RD.moved > 4000);
+    const target = now - RD.moved < 60 ? 0 : settled ? 1 : RD.a;
+    if (RD.a !== target) {
+      RD.a = target < RD.a ? Math.max(target, RD.a - 0.34) : Math.min(target, RD.a + 0.07);
+      roads.alpha = RD.a; s.requestRender();
+    } else if (RD.a < 1 && !RD.poll) {
+      // waiting for tiles with nothing else drawing: look again shortly, or the fade-in would stall
+      RD.poll = setTimeout(() => { RD.poll = 0; s.requestRender(); }, 350);
+    }
+  });
 
   // keep going after a render error instead of freezing
   s.renderError.addEventListener((_, err) => {
@@ -171,7 +216,14 @@ GE.heightAt = async (lon, lat) => {
     if (GE.photoreal && GE.photoreal.show && s.sampleHeightMostDetailed) { const [r] = await Promise.race([s.sampleHeightMostDetailed([k]), new Promise((_, j) => setTimeout(j, 2500))]); if (r && isFinite(r.height)) return r.height; }
     const quick = s.globe.getHeight(k); if (quick != null && GE.terrainKind !== 'terrarium') return quick;
     if (GE.terrainKind === 'ion') { const [r] = await C.sampleTerrainMostDetailed(s.terrainProvider, [k]); return r.height || 0; }
-    if (GE.terrainKind === 'terrarium') return await Promise.race([GE.terra.sample(lon, lat, 14), new Promise((r) => setTimeout(() => r(quick || 0), 2500))]);
+    if (GE.terrainKind === 'terrarium') {
+      // fine sample first; if the network is busy, fall back to what's on screen, then a coarse (fast) tile
+      const late = Symbol(), fine = await Promise.race([GE.terra.sample(lon, lat, 14), new Promise((r) => setTimeout(() => r(late), 2500))]);
+      if (fine !== late && fine != null && !(fine === 0 && quick > 1)) return fine; // a failed tile reads as 0
+      if (quick != null) return quick;
+      const coarse = await Promise.race([GE.terra.sample(lon, lat, 9), new Promise((r) => setTimeout(() => r(null), 2000))]);
+      return coarse ?? 0;
+    }
   } catch {}
   return 0;
 };
@@ -251,7 +303,7 @@ GE.loadPhotoreal = async () => {
           float day = smoothstep(-0.14, 0.06, s);
           float gold = exp(-pow((s - 0.06) / 0.11, 2.0)) * day;
           vec3 c = material.diffuse;
-          c = mix(c * vec3(0.05, 0.07, 0.15), c, day);
+          c = mix(c * vec3(0.14, 0.17, 0.28), c, day);
           c = mix(c, c * vec3(1.16, 0.9, 0.66), gold * 0.55);
           material.diffuse = c;
         }`,

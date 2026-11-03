@@ -291,6 +291,8 @@ body.drawing #globe { cursor: crosshair; }
 .tablet #cinema button { padding: 9px 14px 8px; font-size: 11px; }
 .tablet .swatch { width: 32px; height: 32px; }
 .tablet #cinema { bottom: calc(var(--sb) + 118px); }
+/* iPad full screen: Safari's own ✕ sits in the top-left corner, so the top bar steps right */
+.fs.tablet #top, .fs.phone #top { left: calc(var(--sl) + 62px); }
 @media (max-width: 1100px) { .brand b { display: none; } .brand { padding: 0 11px; } }
 @media (max-width: 1000px) { #status { display: none; } }
 .phone #drawBtn { display: none; }

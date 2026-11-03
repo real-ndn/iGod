@@ -11,6 +11,12 @@ function loop(fn) {
   raf = requestAnimationFrame(step);
 }
 const lerpAng = (a, b, t) => { let d = b - a; d = Math.atan2(Math.sin(d), Math.cos(d)); return a + d * t; };
+// How far a flown camera sits below the safe height over the terrain under it (0 when clear).
+// Target heights can arrive late or coarse, and a camera inside a hill renders black.
+const below = (margin = 70) => {
+  const k = cam().positionCartographic, g = GE.scene.globe.show ? GE.scene.globe.getHeight(k) : null;
+  return g == null ? 0 : Math.max(0, g * (GE.scene.verticalExaggeration || 1) + margin - k.height);
+};
 const wait = (ms) => new Promise((r) => (K.timer = setTimeout(r, ms)));
 GE.setCaption = (eyebrow, text) => { const el = GE.$('caption'); el.innerHTML = ''; if (!text) return; const s = document.createElement('small'); s.textContent = eyebrow || ''; el.append(s, document.createTextNode(text)); };
 
@@ -47,7 +53,8 @@ K.toPlace = (p, extra = {}) => K.flyTo({ lon: p.lon, lat: p.lat, heading: p.v ? 
 
 K.orbit = async (target, opts = {}) => {
   const c = target || GE.viewCenter(); if (!c) return;
-  const h = c.h ?? (await GE.heightAt(c.lon, c.lat)), center = C.Cartesian3.fromDegrees(c.lon, c.lat, h);
+  const h = c.h ?? (await GE.heightAt(c.lon, c.lat));
+  let center = C.Cartesian3.fromDegrees(c.lon, c.lat, h), lift = 0;
   const range = opts.range || GE.clamp(C.Cartesian3.distance(cam().positionWC, center), 400, 3e6);
   let heading = cam().heading; const pitch = opts.pitch ?? (cam().pitch < -1.15 ? -0.5 : cam().pitch);
   if (!opts.keep) K.stop(); K.set(opts.keep ? K.mode : 'orbit');
@@ -55,6 +62,7 @@ K.orbit = async (target, opts = {}) => {
   return new Promise((res) => loop((dt, t) => {
     if (K.mode !== mode) { res(false); return false; }
     heading += dt * (opts.speed || 0.1); cam().lookAt(center, new C.HeadingPitchRange(heading, pitch, range));
+    const d = below(); if (d > 0) { lift += d; center = C.Cartesian3.fromDegrees(c.lon, c.lat, h + lift); cam().lookAt(center, new C.HeadingPitchRange(heading, pitch, range)); }
     if (opts.ms && t - t0 > opts.ms) { cam().lookAtTransform(C.Matrix4.IDENTITY); res(true); return false; }
   }));
 };
@@ -112,7 +120,8 @@ const bearing = (a, b) => { const p1 = a[1] * R, p2 = b[1] * R, dl = (b[0] - a[0
 K.route = async (from, to) => {
   const d = await GE.fetchJSON(GE.fill(GE.CFG.url.osrm, { a: `${from.lon},${from.lat}`, b: `${to.lon},${to.lat}` }), { timeout: 15000 });
   const r = d.routes && d.routes[0]; if (!r) throw new Error('No route');
-  const coords = r.geometry.coordinates;
+  const coords = r.geometry.coordinates, snap = d.waypoints && d.waypoints[1] && d.waypoints[1].distance;
+  if (snap > 2000) GE.toast(`That pin is ${GE.fmt.dist(snap)} from the nearest road, so the drive ends there.`, 6500);
   if (GE.routeEnt) GE.viewer.entities.remove(GE.routeEnt);
   GE.routeEnt = GE.viewer.entities.add({ polyline: { positions: C.Cartesian3.fromDegreesArray(coords.flat()), width: 7, clampToGround: true, material: new C.PolylineGlowMaterialProperty({ glowPower: 0.25, taperPower: 1, color: C.Color.fromCssColorString('#f5b862') }) } });
   GE.route = { coords, distance: r.distance, duration: r.duration, from, to };
@@ -120,22 +129,32 @@ K.route = async (from, to) => {
   return GE.route;
 };
 K.flyRoute = async (route = GE.route) => {
-  if (!route) return; K.stop(); K.set('route');
+  if (!route) return; K.stop(); K.set('route'); document.body.classList.add('touring'); // cinematic, like the tour: any touch hands back control
   const c = route.coords, cum = [0];
   for (let i = 1; i < c.length; i++) cum.push(cum[i - 1] + hav(c[i - 1], c[i]));
   const total = cum[cum.length - 1]; if (total < 50) return K.stop();
   const at = (s) => { s = GE.clamp(s, 0, total); let lo = 0, hi = cum.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] <= s) lo = m; else hi = m; } const t = (s - cum[lo]) / Math.max(1e-6, cum[hi] - cum[lo]); return [GE.lerp(c[lo][0], c[hi][0], t), GE.lerp(c[lo][1], c[hi][1], t)]; };
   const dur = GE.clamp(total / 240, 16, 90) * 1000, h0 = await GE.heightAt(c[0][0], c[0][1]);
-  let hd = bearing(at(0), at(400)), h = h0, sampling = false, t0 = performance.now();
+  // Long drives are flown faster, so fly them higher: the ground stays readable and tiles keep up.
+  // Short ones stay at drone height (about 1.1 km behind and above the road).
+  const speed = total / (dur / 1000), range = GE.clamp(speed * 4, 1100, 42000), pitch = -GE.clamp(0.3 + (range - 1100) / 42000 * 0.45, 0.3, 0.75);
+  const look = Math.max(450, range * 0.4);
+  let hd = bearing(at(0), at(look)), h = h0, lift = 0, sampling = false, t0 = performance.now();
   GE.setCaption('Road flyover', `${route.from.name || 'Start'} → ${route.to.name || 'Destination'} · ${GE.fmt.dist(total)}`);
-  await K.flyTo({ lon: c[0][0], lat: c[0][1], h: h0, heading: hd / R, pitch: -17, range: 1100, duration: 2.6 }, true);
+  await K.flyTo({ lon: c[0][0], lat: c[0][1], h: h0, heading: hd / R, pitch: pitch / R, range, duration: 2.6 }, true);
   if (K.mode !== 'route') return; t0 = performance.now();
   loop((dt, t) => {
     if (K.mode !== 'route') return false;
     const u = GE.clamp((t - t0) / dur, 0, 1), e = u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2, s = e * total, p = at(s);
-    hd = lerpAng(hd, bearing(at(s - 150), at(s + 450)), 0.035);
-    if (!sampling) { sampling = true; GE.heightAt(p[0], p[1]).then((v) => { h = GE.lerp(h, v, 0.5); sampling = false; }); }
-    cam().lookAt(C.Cartesian3.fromDegrees(p[0], p[1], h), new C.HeadingPitchRange(hd, -0.3, 1100));
+    hd = lerpAng(hd, bearing(at(s - look * 0.3), at(s + look)), 0.035);
+    // what's on screen answers at once; the finer sample refines it when it lands
+    const quick = GE.scene.globe.getHeight(C.Cartographic.fromDegrees(p[0], p[1]));
+    if (quick != null) h = Math.max(h - 40, GE.lerp(h, quick * (GE.scene.verticalExaggeration || 1), 0.2));
+    if (!sampling && range < 6000) { sampling = true; GE.heightAt(p[0], p[1]).then((v) => { h = GE.lerp(h, v, 0.5); sampling = false; }); }
+    lift *= 0.985; // ease back down once past the high ground
+    const hpr = new C.HeadingPitchRange(hd, pitch, range);
+    cam().lookAt(C.Cartesian3.fromDegrees(p[0], p[1], h + lift), hpr);
+    const d = below(90); if (d > 0) { lift += d; cam().lookAt(C.Cartesian3.fromDegrees(p[0], p[1], h + lift), hpr); }
     if (u >= 1) { cam().lookAtTransform(C.Matrix4.IDENTITY); K.stop(); return false; }
   });
 };

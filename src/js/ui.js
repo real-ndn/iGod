@@ -252,7 +252,20 @@ GE.ui.initNav = () => {
   $('zin').onclick = () => GE.cam.zoom(0.42); $('zout').onclick = () => GE.cam.zoom(2.4);
   $('homeBtn').onclick = () => { const h = GE.PLACES.find((p) => p.name === GE.CFG.home.name) || { ...GE.CFG.home, v: [35, -28, 2200] }; GE.ui.showPlace({ name: GE.CFG.home.name, sub: GE.CFG.home.sub, lon: GE.CFG.home.lon, lat: GE.CFG.home.lat }); GE.cam.toPlace(h); };
   $('locBtn').onclick = () => GE.ui.locate();
-  $('fsBtn').onclick = () => { try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); } catch { GE.toast('Full screen is not available here.'); } };
+  // Full screen. On iPad, Safari puts its own ✕ in the top-left corner, so the top bar moves over for it.
+  // Opened from the Home Screen the app is already full screen, so the button goes away.
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  if (standalone) { $('fsBtn').hidden = true; document.documentElement.classList.add('standalone'); }
+  const fsSync = () => { document.documentElement.classList.toggle('fs', !!fsEl()); };
+  document.addEventListener('fullscreenchange', fsSync); document.addEventListener('webkitfullscreenchange', fsSync);
+  $('fsBtn').onclick = async () => {
+    const d = document, el = d.documentElement;
+    try {
+      if (fsEl()) await (d.exitFullscreen ? d.exitFullscreen() : d.webkitExitFullscreen());
+      else await (el.requestFullscreen ? el.requestFullscreen() : el.webkitRequestFullscreen());
+    } catch { GE.toast(GE.device === 'desktop' ? 'Full screen is not available here.' : 'For full screen, tap Share → Add to Home Screen, then open God’s Eye from there.', 6500); }
+  };
   addEventListener('keydown', (e) => { if (e.target.closest('input, select, textarea')) return; if (e.key === 'n' || e.key === 'N') GE.cam.north(); if (e.key === '/') { e.preventDefault(); q.focus(); } });
 };
 GE.ui.locate = () => {
