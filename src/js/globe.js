@@ -132,9 +132,10 @@ GE.initGlobe = function () {
   }));
   GE.visionStage.enabled = false;
 
-  // Per frame: moonlight strength, and road names out of the way of fast camera moves.
+  // Per frame: moonlight strength, and road names out of the way of the app's own camera flights.
   // Road names are baked into Esri's raster tiles; mid-flight Cesium stretches them from coarser tiles
-  // into giant blurry text, so they step aside and fade back once the view has loaded.
+  // into giant blurry text, so during tours, dives and flyovers they step aside and fade back once the
+  // view has loaded. Your own pinches and swipes never touch them.
   const RD = { a: 1, last: new C.Cartesian3(), t: 0, moved: -1e9, poll: 0 };
   s.preRender.addEventListener(() => {
     const now = performance.now(), k = cam.positionCartographic;
@@ -144,14 +145,15 @@ GE.initGlobe = function () {
       if (fade > 0) { const alt = GE.sun.altAz(GE.time.now(), k.latitude / R, k.longitude / R).alt; lift = fade * GE.clamp((3 - alt) / 13, 0, 1) * 0.82; }
     }
     GE.nightLift = lift;
-    const want = (GE.visionCode || 0) > 0 || lift > 0.003;
+    const want = (GE.visionCode || 0) > 0 || lift > (GE.visionStage.enabled ? 0.002 : 0.01); // hysteresis: no toggling at dusk
     if (GE.visionStage.enabled !== want) { GE.visionStage.enabled = want; s.requestRender(); }
 
     const roads = GE.L.roads; if (!roads) return;
     const dt = (now - RD.t) / 1000, p = cam.positionWC;
     const speed = dt > 0 && dt < 0.6 ? C.Cartesian3.distance(p, RD.last) / dt / Math.max(40, k.height) : 0; // camera heights per second
     C.Cartesian3.clone(p, RD.last); RD.t = now;
-    if (speed > 0.45 || (speed > 0.22 && now - RD.moved < 500)) RD.moved = now; // hysteresis: no flicker at the threshold
+    const flown = (GE.cam.mode && GE.cam.mode !== 'spin') || GE.cam.flying; // the app is flying the camera, not your fingers
+    if (flown && (speed > 0.45 || (speed > 0.22 && now - RD.moved < 500))) RD.moved = now; // hysteresis: no flicker at the threshold
     const settled = now - RD.moved > 400 && (s.globe.tilesLoaded || now - RD.moved > 4000);
     const target = now - RD.moved < 60 ? 0 : settled ? 1 : RD.a;
     if (RD.a !== target) {

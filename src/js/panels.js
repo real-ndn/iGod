@@ -71,16 +71,19 @@ GE.ui.initPanels = () => {
   [['metric', 'Metric'], ['imperial', 'Imperial']].forEach(([k, t]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.dataset.u = k; b.textContent = t; b.onclick = () => { GE.prefs.units = k; GE.savePrefs(); units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === k)); GE.ui.status && GE.ui.status(); }; units.append(b); });
   units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === GE.prefs.units)); pl.append(units);
   toggleRow(pl, { key: 'voice', label: "Milo's voice", desc: 'Milo speaks replies and tour lines', color: '#8fd8ff', apply: (on) => { if (!on) GE.milo.stopVoice(); else GE.milo.speak("Milo's voice is on."); } });
-  $('kIon').value = GE.keys.ion; $('kGoogle').value = GE.keys.google; $('kAnthropic').value = GE.keys.anthropic; $('kModel').value = GE.keys.model; $('kFirms').value = GE.keys.firms; $('kMly').value = GE.keys.mapillary;
+  $('kIon').value = GE.keys.ion; $('kGoogle').value = GE.keys.google; $('kAnthropic').value = GE.keys.anthropic; $('kModel').value = GE.keys.model; $('kFirms').value = GE.keys.firms; $('kMly').value = GE.keys.mapillary; $('kRelay').value = GE.keys.relay;
+  // a relay address: https only, no trailing slash (a bare host gets https:// added)
+  const cleanRelay = (v) => { v = String(v || '').trim().replace(/\/+$/, ''); if (v && !/^https?:\/\//i.test(v)) v = 'https://' + v; return /^https:\/\/[^\s/]+(\/[^\s]*)?$/i.test(v) ? v : ''; };
   $('kSave').onclick = async () => {
     const before = { ...GE.keys };
-    Object.assign(GE.keys, { ion: $('kIon').value.trim(), google: $('kGoogle').value.trim(), anthropic: $('kAnthropic').value.trim(), model: $('kModel').value, firms: $('kFirms').value.trim(), mapillary: $('kMly').value.trim() });
+    Object.assign(GE.keys, { ion: $('kIon').value.trim(), google: $('kGoogle').value.trim(), anthropic: $('kAnthropic').value.trim(), model: $('kModel').value, firms: $('kFirms').value.trim(), mapillary: $('kMly').value.trim(), relay: cleanRelay($('kRelay').value) });
     GE.store.set('keys', GE.keys); GE.toast('Keys saved in this browser.');
+    if (before.relay !== GE.keys.relay && GE.keys.relay) { GE.prefs.flights = true; GE.savePrefs(); GE.emit('prefs'); GE.live.flights.enable(true); GE.toast('Flight relay saved. Looking for live flights…'); } // try it at once
     if (before.ion !== GE.keys.ion) await GE.applyTerrain();
     if (before.ion !== GE.keys.ion || before.google !== GE.keys.google) { if (GE.photoreal) { GE.scene.primitives.remove(GE.photoreal); GE.photoreal = null; } GE.emit('needKeysChanged'); if (GE.prefs.base === 'photoreal') GE.setBase('photoreal'); }
     syncBase(); GE.emit('keys');
   };
-  $('kClear').onclick = () => { GE.store.del('keys'); Object.assign(GE.keys, { ion: '', google: '', anthropic: '', firms: '', mapillary: '' }); ['kIon', 'kGoogle', 'kAnthropic', 'kFirms', 'kMly'].forEach((id) => ($(id).value = '')); GE.toast('Keys removed from this browser.'); if (GE.prefs.base === 'photoreal') GE.setBase('satellite'); GE.applyTerrain(); syncBase(); GE.emit('keys'); };
+  $('kClear').onclick = () => { GE.store.del('keys'); Object.assign(GE.keys, { ion: '', google: '', anthropic: '', firms: '', mapillary: '', relay: '' }); ['kIon', 'kGoogle', 'kAnthropic', 'kFirms', 'kMly', 'kRelay'].forEach((id) => ($(id).value = '')); GE.toast('Keys removed from this browser.'); if (GE.prefs.base === 'photoreal') GE.setBase('satellite'); GE.applyTerrain(); syncBase(); GE.emit('keys'); };
   $('setHome').onclick = () => { const c = GE.viewCenter(); if (!c) return; GE.CFG.home = { name: (GE.sel && GE.sel.name) || 'Home', sub: 'Your home view', lon: c.lon, lat: c.lat }; GE.store.set('home', GE.CFG.home); GE.toast('Home set to this view.'); };
   $('shareView').onclick = () => { GE.ui.writeHash(); setTimeout(() => GE.copy(location.href, 'Link to this exact view copied'), 750); };
 };

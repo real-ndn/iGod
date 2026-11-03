@@ -437,6 +437,7 @@ body.drawing #globe { cursor: crosshair; }
     <div class="keyrow"><label for="kAnthropic">Anthropic API key</label><input id="kAnthropic" type="password" placeholder="sk-ant-…" spellcheck="false"><small>Gives Milo a Claude brain that can drive the globe. Calls go straight from this browser to Anthropic.</small></div>
     <div class="keyrow"><label for="kFirms">NASA FIRMS map key</label><input id="kFirms" type="password" placeholder="32 characters" spellcheck="false"><small>Free at <a href="https://firms.modaps.eosdis.nasa.gov/api/map_key/" target="_blank" rel="noopener">firms.modaps.eosdis.nasa.gov</a>. Live wildfire hotspots from NASA satellites.</small></div>
     <div class="keyrow"><label for="kMly">Mapillary client token</label><input id="kMly" type="password" placeholder="MLY|…" spellcheck="false"><small>Free at <a href="https://www.mapillary.com/dashboard/developers" target="_blank" rel="noopener">mapillary.com</a>. Street-level photos wherever people have captured them.</small></div>
+    <div class="keyrow"><label for="kRelay">Flight relay</label><input id="kRelay" type="url" inputmode="url" placeholder="https://ge-flights.you.workers.dev" spellcheck="false" autocapitalize="off"><small>Live flights need it: the public flight feeds block web pages. <a href="https://github.com/real-ndn/iGod#live-flights" target="_blank" rel="noopener">Set one up free</a> in about two minutes.</small></div>
     <div class="keyrow"><label for="kModel">Milo's model</label><select id="kModel"><option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest)</option><option value="claude-sonnet-5-5">Claude Sonnet 5.5</option></select></div>
     <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="pill pri" id="kSave">Save keys</button><button type="button" class="pill" id="kClear">Forget keys</button></div>
   </section>
@@ -501,6 +502,10 @@ GE.CFG = {
     celestrak: 'https://celestrak.org/NORAD/elements/gp.php?GROUP={g}&FORMAT=tle',
     iss: 'https://api.wheretheiss.at/v1/satellites/25544',
     adsb: 'https://api.adsb.lol/v2/point/{lat}/{lon}/{r}',
+    // same ADS-B Exchange v2 format. The public feeds send no CORS header, so a page can't read them
+    // directly; with a flight relay set (Settings) that goes first, and these stay as fallbacks in case one opens up.
+    adsbAlt: ['https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{r}'],
+    relayPath: '/v2/point/{lat}/{lon}/{r}',
     osrm: 'https://router.project-osrm.org/route/v1/driving/{a};{b}?overview=full&geometries=geojson',
     satjs: 'https://cdn.jsdelivr.net/npm/satellite.js@7.1.0/+esm',
     wayback: 'https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json',
@@ -534,7 +539,7 @@ GE.store = {
   set(k, v) { try { localStorage.setItem('ge.' + k, JSON.stringify(v)); } catch {} },
   del(k) { try { localStorage.removeItem('ge.' + k); } catch {} },
 };
-GE.keys = Object.assign({ ion: '', google: '', anthropic: '', model: 'claude-haiku-5-5', firms: '', mapillary: '' }, GE.store.get('keys', {}));
+GE.keys = Object.assign({ ion: '', google: '', anthropic: '', model: 'claude-haiku-5-5', firms: '', mapillary: '', relay: '' }, GE.store.get('keys', {}));
 GE.prefs = Object.assign({
   mode: 'user', base: 'satellite', detail: 'ultra', units: 'metric', voice: true,
   labels: true, roads: true, terrain: true, relief: 1, lights: true, sunEverywhere: false, shadows: false, buildings: false,
@@ -753,9 +758,10 @@ GE.initGlobe = function () {
   }));
   GE.visionStage.enabled = false;
 
-  // Per frame: moonlight strength, and road names out of the way of fast camera moves.
+  // Per frame: moonlight strength, and road names out of the way of the app's own camera flights.
   // Road names are baked into Esri's raster tiles; mid-flight Cesium stretches them from coarser tiles
-  // into giant blurry text, so they step aside and fade back once the view has loaded.
+  // into giant blurry text, so during tours, dives and flyovers they step aside and fade back once the
+  // view has loaded. Your own pinches and swipes never touch them.
   const RD = { a: 1, last: new C.Cartesian3(), t: 0, moved: -1e9, poll: 0 };
   s.preRender.addEventListener(() => {
     const now = performance.now(), k = cam.positionCartographic;
@@ -765,14 +771,15 @@ GE.initGlobe = function () {
       if (fade > 0) { const alt = GE.sun.altAz(GE.time.now(), k.latitude / R, k.longitude / R).alt; lift = fade * GE.clamp((3 - alt) / 13, 0, 1) * 0.82; }
     }
     GE.nightLift = lift;
-    const want = (GE.visionCode || 0) > 0 || lift > 0.003;
+    const want = (GE.visionCode || 0) > 0 || lift > (GE.visionStage.enabled ? 0.002 : 0.01); // hysteresis: no toggling at dusk
     if (GE.visionStage.enabled !== want) { GE.visionStage.enabled = want; s.requestRender(); }
 
     const roads = GE.L.roads; if (!roads) return;
     const dt = (now - RD.t) / 1000, p = cam.positionWC;
     const speed = dt > 0 && dt < 0.6 ? C.Cartesian3.distance(p, RD.last) / dt / Math.max(40, k.height) : 0; // camera heights per second
     C.Cartesian3.clone(p, RD.last); RD.t = now;
-    if (speed > 0.45 || (speed > 0.22 && now - RD.moved < 500)) RD.moved = now; // hysteresis: no flicker at the threshold
+    const flown = (GE.cam.mode && GE.cam.mode !== 'spin') || GE.cam.flying; // the app is flying the camera, not your fingers
+    if (flown && (speed > 0.45 || (speed > 0.22 && now - RD.moved < 500))) RD.moved = now; // hysteresis: no flicker at the threshold
     const settled = now - RD.moved > 400 && (s.globe.tilesLoaded || now - RD.moved > 4000);
     const target = now - RD.moved < 60 ? 0 : settled ? 1 : RD.a;
     if (RD.a !== target) {
@@ -1081,13 +1088,26 @@ const planeImg = (() => {
 })();
 const altColor = (m) => C.Color.fromHsl(GE.clamp(0.09 + (m / 12500) * 0.47, 0.09, 0.56), 0.85, 0.66, 1);
 async function flightPoll() {
-  if (!FL.on) return;
+  if (!FL.on || FL.busy) return; // one poll at a time, even when a feed is slow
+  FL.busy = true;
+  try { await flightPollOnce(); } finally { FL.busy = false; }
+}
+async function flightPollOnce() {
   const ch = GE.camera.positionCartographic.height;
   if (ch > 2.6e6) { if (!FL.hinted) { GE.toast('Zoom in below 2,500 km to see live flights around you.'); FL.hinted = true; } return; }
   const c = GE.viewCenter(); if (!c) return;
-  const r = Math.round(GE.clamp(ch / 1852 * 1.1, 25, 250));
+  const r = Math.round(GE.clamp(ch / 1852 * 1.1, 25, 250)), q = { lat: c.lat.toFixed(3), lon: c.lon.toFixed(3), r };
+  const relay = (GE.keys.relay || '').replace(/\/+$/, ''), feeds = [...(relay ? [relay + GE.CFG.url.relayPath] : []), GE.CFG.url.adsb, ...GE.CFG.url.adsbAlt];
   try {
-    const d = await GE.fetchJSON(GE.fill(GE.CFG.url.adsb, { lat: c.lat.toFixed(3), lon: c.lon.toFixed(3), r }), { timeout: 10000 });
+    // the feed that answered last time first, then the others
+    let d = null;
+    if (FL.feeds !== feeds.join()) { FL.feeds = feeds.join(); FL.src = 0; } // the relay changed: start from the top
+    for (const i of [FL.src || 0, ...feeds.keys()].filter((v, k, a) => a.indexOf(v) === k)) {
+      try { d = await GE.fetchJSON(GE.fill(feeds[i], q), { timeout: 8000 }); if (d && (d.ac || d.aircraft)) { FL.src = i; FL.name = relay && i === 0 ? 'adsb.lol' : new URL(feeds[i]).host.replace(/^(api|opendata)\./, ''); break; } d = null; } catch {}
+      if (!FL.on) return;
+    }
+    if (!d) throw new Error('no flight feed answered');
+    FL.fails = 0;
     const now = Date.now(), list = d.ac || d.aircraft || [];
     for (const a of list) {
       if (a.lat == null || a.lon == null) continue;
@@ -1102,7 +1122,12 @@ async function flightPoll() {
     GE.emit('flights', FL.map.size);
   } catch (e) {
     console.warn(e);
-    if (!FL.warned) { FL.warned = true; GE.toast('The flight feed (adsb.lol) did not answer this browser. It may block direct access; route it through your server to enable.', 7000); }
+    // twice in a row with nothing from any feed: switch the layer off instead of polling (and drawing) for nothing
+    if (++FL.fails >= 2) {
+      GE.toast(relay ? "Your flight relay didn't answer. Check its address in Settings → Flight relay, then turn Flights on again."
+        : 'Live flights need a free flight relay, because the public flight feeds block web pages. Settings → Flight relay shows the two-minute setup.', 9000);
+      GE.prefs.flights = false; GE.savePrefs(); GE.emit('prefs'); FL.enable(false);
+    }
   }
 }
 FL.position = (f, now = Date.now()) => {
@@ -1110,12 +1135,13 @@ FL.position = (f, now = Date.now()) => {
   const lat = f.lat + (dist * Math.cos(tr)) / 111320, lon = f.lon + (dist * Math.sin(tr)) / (111320 * Math.cos(f.lat * R));
   return { lat, lon, alt: f.alt, pos: C.Cartesian3.fromDegrees(lon, lat, f.alt) };
 };
-function flightAnim() { const now = Date.now(); for (const f of FL.map.values()) f.bb.position = FL.position(f, now).pos; GE.scene.requestRender(); }
+// no planes, no frames: an empty sky shouldn't keep the iPad drawing five times a second
+function flightAnim() { if (!FL.map.size) return; const now = Date.now(); for (const f of FL.map.values()) f.bb.position = FL.position(f, now).pos; GE.scene.requestRender(); }
 FL.enable = (on) => {
   FL.on = on; clearInterval(FL.poll); clearInterval(FL.anim);
   if (!FL.bb) FL.bb = GE.scene.primitives.add(new C.BillboardCollection({ scene: GE.scene }));
   FL.bb.show = on; if (!on) { GE.scene.requestRender(); return; }
-  FL.warned = false; flightPoll(); FL.poll = setInterval(flightPoll, 9000); FL.anim = setInterval(flightAnim, 200);
+  FL.fails = 0; flightPoll(); FL.poll = setInterval(flightPoll, 9000); FL.anim = setInterval(flightAnim, 200);
 };
 FL.find = (q) => { q = String(q).toLowerCase().replace(/\s/g, ''); for (const f of FL.map.values()) if (f.cs.toLowerCase().replace(/\s/g, '') === q || f.reg.toLowerCase() === q) return f; return null; };
 
@@ -1161,10 +1187,13 @@ const horizon = (GE.live.horizon = (() => {
     if (FI.on && FI.pts) for (let i = 0, n = FI.pts.length; i < n; i++) { const p = FI.pts.get(i), v = occ.isPointVisible(p.position); if (p.show !== v) { p.show = v; changed = true; } }
     if (changed) GE.scene.requestRender();
   }
+  // while you pinch or swipe this runs at most 4 times a second, off the gesture's frames; once more when the camera settles
+  let last = 0;
   const kick = () => {
     if (!GE.camera) return;
-    if (!hooked) { hooked = true; GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(kick); }
-    if (!pending) { pending = true; requestAnimationFrame(run); }
+    if (!hooked) { hooked = true; GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(() => setTimeout(run, 0)); }
+    if (pending || !(Q.on || EV.on || FI.on)) return;
+    pending = true; setTimeout(() => { last = performance.now(); run(); }, Math.max(0, 250 - (performance.now() - last)));
   };
   return { see, kick, run };
 })());
@@ -1399,15 +1428,27 @@ LB.update = () => {
       used.push([e, st, pos]); if (st.dot) usedD.push([e, pos]);
     }
   }
-  while (LB.pool.length < used.length) LB.pool.push(LB.coll.add({ show: false, style: C.LabelStyle.FILL_AND_OUTLINE, outlineColor: C.Color.BLACK.withAlpha(0.78), disableDepthTestDistance: Number.POSITIVE_INFINITY }));
   while (LB.dpool.length < usedD.length) LB.dpool.push(LB.dots.add({ show: false, pixelSize: 5, outlineColor: C.Color.BLACK.withAlpha(0.7), outlineWidth: 1.5, disableDepthTestDistance: Number.POSITIVE_INFINITY }));
-  LB.pool.forEach((l, i) => {
-    const u = used[i]; if (!u) { l.show = false; return; }
-    const [e, st, pos] = u; l.position = pos;
-    if (l._k !== e) { l._k = e; l.text = st.text; l.font = st.font; l.fillColor = C.Color.fromCssColorString(st.fill); l.outlineWidth = st.ow;
-      l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' || st.oy ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, st.oy || 0); }
+  // Each label stays on the same name for as long as that name stays on screen. Rebinding text
+  // re-lays out its glyphs, which is the expensive part; slot-by-slot reuse did that to almost every
+  // label whenever one name came or went, many times a second while you pinch or swipe.
+  const want = new Map(); for (const u of used) want.set(u[0], u);
+  const spare = [];
+  for (const l of LB.pool) {
+    const u = l._k && want.get(l._k);
+    if (!u) { spare.push(l); continue; }
+    want.delete(l._k); l.position = u[2];
+    if (l._t !== u[1].text) { l._t = l.text = u[1].text; } // same place, new wording (units changed)
     l.show = true;
-  });
+  }
+  for (const [e, st, pos] of want.values()) {
+    let l = spare.pop();
+    if (!l) { l = LB.coll.add({ show: false, style: C.LabelStyle.FILL_AND_OUTLINE, outlineColor: C.Color.BLACK.withAlpha(0.78), disableDepthTestDistance: Number.POSITIVE_INFINITY }); LB.pool.push(l); }
+    l._k = e; l._t = l.text = st.text; l.font = st.font; l.fillColor = C.Color.fromCssColorString(st.fill); l.outlineWidth = st.ow;
+    l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' || st.oy ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, st.oy || 0);
+    l.position = pos; l.show = true;
+  }
+  for (const l of spare) l.show = false;
   LB.dpool.forEach((d, i) => { const u = usedD[i]; if (!u) { d.show = false; return; } const [e, pos] = u; d.position = pos; d.color = e.extra.cap ? C.Color.fromCssColorString('#f5b862') : C.Color.WHITE; d.pixelSize = e.extra.cap ? 6.5 : 5; d.show = true; });
   s.requestRender();
 };
@@ -1636,7 +1677,7 @@ const wait = (ms) => new Promise((r) => (K.timer = setTimeout(r, ms)));
 GE.setCaption = (eyebrow, text) => { const el = GE.$('caption'); el.innerHTML = ''; if (!text) return; const s = document.createElement('small'); s.textContent = eyebrow || ''; el.append(s, document.createTextNode(text)); };
 
 K.stop = () => {
-  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer);
+  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer); K.flying = false;
   const was = K.mode; K.mode = null;
   try { cam().lookAtTransform(C.Matrix4.IDENTITY); } catch {}
   document.body.classList.remove('touring'); GE.setCaption();
@@ -1653,15 +1694,19 @@ K.init = () => {
 // Fly to a point with a cinematic offset (heading/pitch in degrees, range in meters), or frame a rectangle [w,s,e,n].
 K.flyTo = async (o, keepMode) => {
   if (!keepMode) K.stop();
+  // K.flying: the app is moving the camera (road names step aside for it; see globe.js)
+  const done = (v) => { K.flying = false; return v; };
   if (o.rect) {
     const sphere = C.BoundingSphere.fromRectangle3D(C.Rectangle.fromDegrees(...o.rect), C.Ellipsoid.WGS84, 0);
-    return new Promise((res) => cam().flyToBoundingSphere(sphere, { offset: new C.HeadingPitchRange(0, -0.8, 0), duration: o.duration, complete: res, cancel: res }));
+    K.flying = true;
+    return new Promise((res) => cam().flyToBoundingSphere(sphere, { offset: new C.HeadingPitchRange(0, -0.8, 0), duration: o.duration, complete: () => res(done()), cancel: () => res(done()) }));
   }
   const h = o.h ?? (await GE.heightAt(o.lon, o.lat));
   const target = C.Cartesian3.fromDegrees(o.lon, o.lat, h);
+  K.flying = true;
   return new Promise((res) => cam().flyToBoundingSphere(new C.BoundingSphere(target, 1), {
     offset: new C.HeadingPitchRange((o.heading ?? 0) * R, (o.pitch ?? -35) * R, o.range ?? 2500),
-    duration: o.duration, easingFunction: o.easing, complete: () => res(true), cancel: () => res(false),
+    duration: o.duration, easingFunction: o.easing, complete: () => res(done(true)), cancel: () => res(done(false)),
   }));
 };
 K.toPlace = (p, extra = {}) => K.flyTo({ lon: p.lon, lat: p.lat, heading: p.v ? p.v[0] : 0, pitch: p.v ? p.v[1] : -32, range: p.v ? p.v[2] : extra.range || 2500, ...extra });
@@ -1966,7 +2011,7 @@ GE.ui.showFlight = (f) => {
   GE.sel = null; if (GE.pin) GE.pin.show = false;
   const draw = () => { const p = GE.live.flights.position(f); openCard({ key: 'fl' + f.id, kind: 'Flight · live', kc: 'var(--ice)', title: f.cs, sub: [f.type, f.reg].filter(Boolean).join(' · ') || 'Aircraft',
     facts: [['Altitude', f.alt ? F.elev(f.alt) : 'On ground'], ['Speed', F.speed(f.gs)], ['Heading', Math.round(f.trk) + '° ' + F.dir(f.trk)], f.squawk ? ['Squawk', f.squawk] : null],
-    acts: [{ label: 'Follow', icon: 'plane', pri: true, fn: () => GE.cam.follow(f) }], coords: [p.lat, p.lon], links: [['adsb.lol', `https://adsb.lol/?icao=${f.id}`]] }); };
+    acts: [{ label: 'Follow', icon: 'plane', pri: true, fn: () => GE.cam.follow(f) }], coords: [p.lat, p.lon], links: [[GE.live.flights.name || 'adsb.lol', `https://${(GE.live.flights.name || 'adsb.lol').replace('adsb.fi', 'globe.adsb.fi').replace('airplanes.live', 'globe.airplanes.live')}/?icao=${f.id}`]] }); };
   draw(); const k = 'fl' + f.id, iv = setInterval(() => { if (cardKey !== k || card.hidden) return clearInterval(iv); draw(); }, 2000);
 };
 GE.ui.showQuake = (g) => {
@@ -2186,16 +2231,19 @@ GE.ui.initPanels = () => {
   [['metric', 'Metric'], ['imperial', 'Imperial']].forEach(([k, t]) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.dataset.u = k; b.textContent = t; b.onclick = () => { GE.prefs.units = k; GE.savePrefs(); units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === k)); GE.ui.status && GE.ui.status(); }; units.append(b); });
   units.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.u === GE.prefs.units)); pl.append(units);
   toggleRow(pl, { key: 'voice', label: "Milo's voice", desc: 'Milo speaks replies and tour lines', color: '#8fd8ff', apply: (on) => { if (!on) GE.milo.stopVoice(); else GE.milo.speak("Milo's voice is on."); } });
-  $('kIon').value = GE.keys.ion; $('kGoogle').value = GE.keys.google; $('kAnthropic').value = GE.keys.anthropic; $('kModel').value = GE.keys.model; $('kFirms').value = GE.keys.firms; $('kMly').value = GE.keys.mapillary;
+  $('kIon').value = GE.keys.ion; $('kGoogle').value = GE.keys.google; $('kAnthropic').value = GE.keys.anthropic; $('kModel').value = GE.keys.model; $('kFirms').value = GE.keys.firms; $('kMly').value = GE.keys.mapillary; $('kRelay').value = GE.keys.relay;
+  // a relay address: https only, no trailing slash (a bare host gets https:// added)
+  const cleanRelay = (v) => { v = String(v || '').trim().replace(/\/+$/, ''); if (v && !/^https?:\/\//i.test(v)) v = 'https://' + v; return /^https:\/\/[^\s/]+(\/[^\s]*)?$/i.test(v) ? v : ''; };
   $('kSave').onclick = async () => {
     const before = { ...GE.keys };
-    Object.assign(GE.keys, { ion: $('kIon').value.trim(), google: $('kGoogle').value.trim(), anthropic: $('kAnthropic').value.trim(), model: $('kModel').value, firms: $('kFirms').value.trim(), mapillary: $('kMly').value.trim() });
+    Object.assign(GE.keys, { ion: $('kIon').value.trim(), google: $('kGoogle').value.trim(), anthropic: $('kAnthropic').value.trim(), model: $('kModel').value, firms: $('kFirms').value.trim(), mapillary: $('kMly').value.trim(), relay: cleanRelay($('kRelay').value) });
     GE.store.set('keys', GE.keys); GE.toast('Keys saved in this browser.');
+    if (before.relay !== GE.keys.relay && GE.keys.relay) { GE.prefs.flights = true; GE.savePrefs(); GE.emit('prefs'); GE.live.flights.enable(true); GE.toast('Flight relay saved. Looking for live flights…'); } // try it at once
     if (before.ion !== GE.keys.ion) await GE.applyTerrain();
     if (before.ion !== GE.keys.ion || before.google !== GE.keys.google) { if (GE.photoreal) { GE.scene.primitives.remove(GE.photoreal); GE.photoreal = null; } GE.emit('needKeysChanged'); if (GE.prefs.base === 'photoreal') GE.setBase('photoreal'); }
     syncBase(); GE.emit('keys');
   };
-  $('kClear').onclick = () => { GE.store.del('keys'); Object.assign(GE.keys, { ion: '', google: '', anthropic: '', firms: '', mapillary: '' }); ['kIon', 'kGoogle', 'kAnthropic', 'kFirms', 'kMly'].forEach((id) => ($(id).value = '')); GE.toast('Keys removed from this browser.'); if (GE.prefs.base === 'photoreal') GE.setBase('satellite'); GE.applyTerrain(); syncBase(); GE.emit('keys'); };
+  $('kClear').onclick = () => { GE.store.del('keys'); Object.assign(GE.keys, { ion: '', google: '', anthropic: '', firms: '', mapillary: '', relay: '' }); ['kIon', 'kGoogle', 'kAnthropic', 'kFirms', 'kMly', 'kRelay'].forEach((id) => ($(id).value = '')); GE.toast('Keys removed from this browser.'); if (GE.prefs.base === 'photoreal') GE.setBase('satellite'); GE.applyTerrain(); syncBase(); GE.emit('keys'); };
   $('setHome').onclick = () => { const c = GE.viewCenter(); if (!c) return; GE.CFG.home = { name: (GE.sel && GE.sel.name) || 'Home', sub: 'Your home view', lon: c.lon, lat: c.lat }; GE.store.set('home', GE.CFG.home); GE.toast('Home set to this view.'); };
   $('shareView').onclick = () => { GE.ui.writeHash(); setTimeout(() => GE.copy(location.href, 'Link to this exact view copied'), 750); };
 };

@@ -42,6 +42,21 @@ Add these in **Settings**. They're saved only in your browser.
 | Anthropic API key | Milo thinks with Claude |
 | NASA FIRMS map key (free) | Wildfire hotspots straight from NASA |
 | Mapillary client token (free) | Street-level photos |
+| Flight relay (free, see below) | Live flights |
+
+## Live flights
+
+The public flight feeds (adsb.lol, adsb.fi, airplanes.live, OpenSky) answer servers, but they don't let web pages read their data. That's a browser safety rule called CORS. So God's Eye needs a small relay in between. [`relay/flights-worker.js`](relay/flights-worker.js) is one. It runs free on Cloudflare (100,000 requests a day), only forwards "aircraft near a point" questions, and only answers this site.
+
+Setup takes about two minutes, and works from an iPad:
+
+1. Sign up free at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up).
+2. Open **Workers & Pages → Create → Start with Hello World**. Name it `ge-flights` and tap **Deploy**.
+3. Tap **Edit code**. Replace everything with the contents of [`relay/flights-worker.js`](relay/flights-worker.js) (open it on GitHub, tap **Raw**, select all, copy). Then tap **Deploy**.
+4. Copy the worker's address, which looks like `https://ge-flights.your-name.workers.dev`. Opening it should say the relay is running.
+5. In God's Eye, open **Settings**, paste the address into **Flight relay** and tap **Save keys**. Flights switch on.
+
+If you put God's Eye at another address, add that address to `SITES` at the top of the worker.
 
 ## Live data pipeline
 
@@ -73,7 +88,7 @@ The sources are in `src/`:
 - **Terrain:** Mapzen Terrarium on AWS Open Data.
 - **Labels and borders:** Natural Earth (public domain).
 - **Orbits:** CelesTrak and satellite.js (MIT).
-- **Live feeds:** USGS earthquakes, NASA EONET and FIRMS, adsb.lol flights.
+- **Live feeds:** USGS earthquakes, NASA EONET and FIRMS, and flights from adsb.lol and adsb.fi through your relay.
 - **Search and routes:** Photon and OSRM (© OpenStreetMap contributors).
 - **Street level:** Mapillary.
 - **Photoreal 3D:** Google Map Tiles API.

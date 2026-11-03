@@ -142,15 +142,27 @@ LB.update = () => {
       used.push([e, st, pos]); if (st.dot) usedD.push([e, pos]);
     }
   }
-  while (LB.pool.length < used.length) LB.pool.push(LB.coll.add({ show: false, style: C.LabelStyle.FILL_AND_OUTLINE, outlineColor: C.Color.BLACK.withAlpha(0.78), disableDepthTestDistance: Number.POSITIVE_INFINITY }));
   while (LB.dpool.length < usedD.length) LB.dpool.push(LB.dots.add({ show: false, pixelSize: 5, outlineColor: C.Color.BLACK.withAlpha(0.7), outlineWidth: 1.5, disableDepthTestDistance: Number.POSITIVE_INFINITY }));
-  LB.pool.forEach((l, i) => {
-    const u = used[i]; if (!u) { l.show = false; return; }
-    const [e, st, pos] = u; l.position = pos;
-    if (l._k !== e) { l._k = e; l.text = st.text; l.font = st.font; l.fillColor = C.Color.fromCssColorString(st.fill); l.outlineWidth = st.ow;
-      l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' || st.oy ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, st.oy || 0); }
+  // Each label stays on the same name for as long as that name stays on screen. Rebinding text
+  // re-lays out its glyphs, which is the expensive part; slot-by-slot reuse did that to almost every
+  // label whenever one name came or went, many times a second while you pinch or swipe.
+  const want = new Map(); for (const u of used) want.set(u[0], u);
+  const spare = [];
+  for (const l of LB.pool) {
+    const u = l._k && want.get(l._k);
+    if (!u) { spare.push(l); continue; }
+    want.delete(l._k); l.position = u[2];
+    if (l._t !== u[1].text) { l._t = l.text = u[1].text; } // same place, new wording (units changed)
     l.show = true;
-  });
+  }
+  for (const [e, st, pos] of want.values()) {
+    let l = spare.pop();
+    if (!l) { l = LB.coll.add({ show: false, style: C.LabelStyle.FILL_AND_OUTLINE, outlineColor: C.Color.BLACK.withAlpha(0.78), disableDepthTestDistance: Number.POSITIVE_INFINITY }); LB.pool.push(l); }
+    l._k = e; l._t = l.text = st.text; l.font = st.font; l.fillColor = C.Color.fromCssColorString(st.fill); l.outlineWidth = st.ow;
+    l.horizontalOrigin = st.dot ? C.HorizontalOrigin.LEFT : C.HorizontalOrigin.CENTER; l.verticalOrigin = e.t === 'k' || st.oy ? C.VerticalOrigin.BOTTOM : C.VerticalOrigin.CENTER; l.pixelOffset = new C.Cartesian2(st.dot ? 8 : 0, st.oy || 0);
+    l.position = pos; l.show = true;
+  }
+  for (const l of spare) l.show = false;
   LB.dpool.forEach((d, i) => { const u = usedD[i]; if (!u) { d.show = false; return; } const [e, pos] = u; d.position = pos; d.color = e.extra.cap ? C.Color.fromCssColorString('#f5b862') : C.Color.WHITE; d.pixelSize = e.extra.cap ? 6.5 : 5; d.show = true; });
   s.requestRender();
 };

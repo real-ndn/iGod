@@ -174,7 +174,7 @@ GE.ui.showFlight = (f) => {
   GE.sel = null; if (GE.pin) GE.pin.show = false;
   const draw = () => { const p = GE.live.flights.position(f); openCard({ key: 'fl' + f.id, kind: 'Flight · live', kc: 'var(--ice)', title: f.cs, sub: [f.type, f.reg].filter(Boolean).join(' · ') || 'Aircraft',
     facts: [['Altitude', f.alt ? F.elev(f.alt) : 'On ground'], ['Speed', F.speed(f.gs)], ['Heading', Math.round(f.trk) + '° ' + F.dir(f.trk)], f.squawk ? ['Squawk', f.squawk] : null],
-    acts: [{ label: 'Follow', icon: 'plane', pri: true, fn: () => GE.cam.follow(f) }], coords: [p.lat, p.lon], links: [['adsb.lol', `https://adsb.lol/?icao=${f.id}`]] }); };
+    acts: [{ label: 'Follow', icon: 'plane', pri: true, fn: () => GE.cam.follow(f) }], coords: [p.lat, p.lon], links: [[GE.live.flights.name || 'adsb.lol', `https://${(GE.live.flights.name || 'adsb.lol').replace('adsb.fi', 'globe.adsb.fi').replace('airplanes.live', 'globe.airplanes.live')}/?icao=${f.id}`]] }); };
   draw(); const k = 'fl' + f.id, iv = setInterval(() => { if (cardKey !== k || card.hidden) return clearInterval(iv); draw(); }, 2000);
 };
 GE.ui.showQuake = (g) => {

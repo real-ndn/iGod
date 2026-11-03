@@ -21,7 +21,7 @@ const wait = (ms) => new Promise((r) => (K.timer = setTimeout(r, ms)));
 GE.setCaption = (eyebrow, text) => { const el = GE.$('caption'); el.innerHTML = ''; if (!text) return; const s = document.createElement('small'); s.textContent = eyebrow || ''; el.append(s, document.createTextNode(text)); };
 
 K.stop = () => {
-  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer);
+  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer); K.flying = false;
   const was = K.mode; K.mode = null;
   try { cam().lookAtTransform(C.Matrix4.IDENTITY); } catch {}
   document.body.classList.remove('touring'); GE.setCaption();
@@ -38,15 +38,19 @@ K.init = () => {
 // Fly to a point with a cinematic offset (heading/pitch in degrees, range in meters), or frame a rectangle [w,s,e,n].
 K.flyTo = async (o, keepMode) => {
   if (!keepMode) K.stop();
+  // K.flying: the app is moving the camera (road names step aside for it; see globe.js)
+  const done = (v) => { K.flying = false; return v; };
   if (o.rect) {
     const sphere = C.BoundingSphere.fromRectangle3D(C.Rectangle.fromDegrees(...o.rect), C.Ellipsoid.WGS84, 0);
-    return new Promise((res) => cam().flyToBoundingSphere(sphere, { offset: new C.HeadingPitchRange(0, -0.8, 0), duration: o.duration, complete: res, cancel: res }));
+    K.flying = true;
+    return new Promise((res) => cam().flyToBoundingSphere(sphere, { offset: new C.HeadingPitchRange(0, -0.8, 0), duration: o.duration, complete: () => res(done()), cancel: () => res(done()) }));
   }
   const h = o.h ?? (await GE.heightAt(o.lon, o.lat));
   const target = C.Cartesian3.fromDegrees(o.lon, o.lat, h);
+  K.flying = true;
   return new Promise((res) => cam().flyToBoundingSphere(new C.BoundingSphere(target, 1), {
     offset: new C.HeadingPitchRange((o.heading ?? 0) * R, (o.pitch ?? -35) * R, o.range ?? 2500),
-    duration: o.duration, easingFunction: o.easing, complete: () => res(true), cancel: () => res(false),
+    duration: o.duration, easingFunction: o.easing, complete: () => res(done(true)), cancel: () => res(done(false)),
   }));
 };
 K.toPlace = (p, extra = {}) => K.flyTo({ lon: p.lon, lat: p.lat, heading: p.v ? p.v[0] : 0, pitch: p.v ? p.v[1] : -32, range: p.v ? p.v[2] : extra.range || 2500, ...extra });

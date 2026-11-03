@@ -120,13 +120,26 @@ const planeImg = (() => {
 })();
 const altColor = (m) => C.Color.fromHsl(GE.clamp(0.09 + (m / 12500) * 0.47, 0.09, 0.56), 0.85, 0.66, 1);
 async function flightPoll() {
-  if (!FL.on) return;
+  if (!FL.on || FL.busy) return; // one poll at a time, even when a feed is slow
+  FL.busy = true;
+  try { await flightPollOnce(); } finally { FL.busy = false; }
+}
+async function flightPollOnce() {
   const ch = GE.camera.positionCartographic.height;
   if (ch > 2.6e6) { if (!FL.hinted) { GE.toast('Zoom in below 2,500 km to see live flights around you.'); FL.hinted = true; } return; }
   const c = GE.viewCenter(); if (!c) return;
-  const r = Math.round(GE.clamp(ch / 1852 * 1.1, 25, 250));
+  const r = Math.round(GE.clamp(ch / 1852 * 1.1, 25, 250)), q = { lat: c.lat.toFixed(3), lon: c.lon.toFixed(3), r };
+  const relay = (GE.keys.relay || '').replace(/\/+$/, ''), feeds = [...(relay ? [relay + GE.CFG.url.relayPath] : []), GE.CFG.url.adsb, ...GE.CFG.url.adsbAlt];
   try {
-    const d = await GE.fetchJSON(GE.fill(GE.CFG.url.adsb, { lat: c.lat.toFixed(3), lon: c.lon.toFixed(3), r }), { timeout: 10000 });
+    // the feed that answered last time first, then the others
+    let d = null;
+    if (FL.feeds !== feeds.join()) { FL.feeds = feeds.join(); FL.src = 0; } // the relay changed: start from the top
+    for (const i of [FL.src || 0, ...feeds.keys()].filter((v, k, a) => a.indexOf(v) === k)) {
+      try { d = await GE.fetchJSON(GE.fill(feeds[i], q), { timeout: 8000 }); if (d && (d.ac || d.aircraft)) { FL.src = i; FL.name = relay && i === 0 ? 'adsb.lol' : new URL(feeds[i]).host.replace(/^(api|opendata)\./, ''); break; } d = null; } catch {}
+      if (!FL.on) return;
+    }
+    if (!d) throw new Error('no flight feed answered');
+    FL.fails = 0;
     const now = Date.now(), list = d.ac || d.aircraft || [];
     for (const a of list) {
       if (a.lat == null || a.lon == null) continue;
@@ -141,7 +154,12 @@ async function flightPoll() {
     GE.emit('flights', FL.map.size);
   } catch (e) {
     console.warn(e);
-    if (!FL.warned) { FL.warned = true; GE.toast('The flight feed (adsb.lol) did not answer this browser. It may block direct access; route it through your server to enable.', 7000); }
+    // twice in a row with nothing from any feed: switch the layer off instead of polling (and drawing) for nothing
+    if (++FL.fails >= 2) {
+      GE.toast(relay ? "Your flight relay didn't answer. Check its address in Settings → Flight relay, then turn Flights on again."
+        : 'Live flights need a free flight relay, because the public flight feeds block web pages. Settings → Flight relay shows the two-minute setup.', 9000);
+      GE.prefs.flights = false; GE.savePrefs(); GE.emit('prefs'); FL.enable(false);
+    }
   }
 }
 FL.position = (f, now = Date.now()) => {
@@ -149,12 +167,13 @@ FL.position = (f, now = Date.now()) => {
   const lat = f.lat + (dist * Math.cos(tr)) / 111320, lon = f.lon + (dist * Math.sin(tr)) / (111320 * Math.cos(f.lat * R));
   return { lat, lon, alt: f.alt, pos: C.Cartesian3.fromDegrees(lon, lat, f.alt) };
 };
-function flightAnim() { const now = Date.now(); for (const f of FL.map.values()) f.bb.position = FL.position(f, now).pos; GE.scene.requestRender(); }
+// no planes, no frames: an empty sky shouldn't keep the iPad drawing five times a second
+function flightAnim() { if (!FL.map.size) return; const now = Date.now(); for (const f of FL.map.values()) f.bb.position = FL.position(f, now).pos; GE.scene.requestRender(); }
 FL.enable = (on) => {
   FL.on = on; clearInterval(FL.poll); clearInterval(FL.anim);
   if (!FL.bb) FL.bb = GE.scene.primitives.add(new C.BillboardCollection({ scene: GE.scene }));
   FL.bb.show = on; if (!on) { GE.scene.requestRender(); return; }
-  FL.warned = false; flightPoll(); FL.poll = setInterval(flightPoll, 9000); FL.anim = setInterval(flightAnim, 200);
+  FL.fails = 0; flightPoll(); FL.poll = setInterval(flightPoll, 9000); FL.anim = setInterval(flightAnim, 200);
 };
 FL.find = (q) => { q = String(q).toLowerCase().replace(/\s/g, ''); for (const f of FL.map.values()) if (f.cs.toLowerCase().replace(/\s/g, '') === q || f.reg.toLowerCase() === q) return f; return null; };
 
@@ -200,10 +219,13 @@ const horizon = (GE.live.horizon = (() => {
     if (FI.on && FI.pts) for (let i = 0, n = FI.pts.length; i < n; i++) { const p = FI.pts.get(i), v = occ.isPointVisible(p.position); if (p.show !== v) { p.show = v; changed = true; } }
     if (changed) GE.scene.requestRender();
   }
+  // while you pinch or swipe this runs at most 4 times a second, off the gesture's frames; once more when the camera settles
+  let last = 0;
   const kick = () => {
     if (!GE.camera) return;
-    if (!hooked) { hooked = true; GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(kick); }
-    if (!pending) { pending = true; requestAnimationFrame(run); }
+    if (!hooked) { hooked = true; GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(() => setTimeout(run, 0)); }
+    if (pending || !(Q.on || EV.on || FI.on)) return;
+    pending = true; setTimeout(() => { last = performance.now(); run(); }, Math.max(0, 250 - (performance.now() - last)));
   };
   return { see, kick, run };
 })());

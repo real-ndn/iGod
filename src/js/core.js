@@ -17,6 +17,10 @@ GE.CFG = {
     celestrak: 'https://celestrak.org/NORAD/elements/gp.php?GROUP={g}&FORMAT=tle',
     iss: 'https://api.wheretheiss.at/v1/satellites/25544',
     adsb: 'https://api.adsb.lol/v2/point/{lat}/{lon}/{r}',
+    // same ADS-B Exchange v2 format. The public feeds send no CORS header, so a page can't read them
+    // directly; with a flight relay set (Settings) that goes first, and these stay as fallbacks in case one opens up.
+    adsbAlt: ['https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{r}'],
+    relayPath: '/v2/point/{lat}/{lon}/{r}',
     osrm: 'https://router.project-osrm.org/route/v1/driving/{a};{b}?overview=full&geometries=geojson',
     satjs: 'https://cdn.jsdelivr.net/npm/satellite.js@7.1.0/+esm',
     wayback: 'https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json',
@@ -50,7 +54,7 @@ GE.store = {
   set(k, v) { try { localStorage.setItem('ge.' + k, JSON.stringify(v)); } catch {} },
   del(k) { try { localStorage.removeItem('ge.' + k); } catch {} },
 };
-GE.keys = Object.assign({ ion: '', google: '', anthropic: '', model: 'claude-haiku-5-5', firms: '', mapillary: '' }, GE.store.get('keys', {}));
+GE.keys = Object.assign({ ion: '', google: '', anthropic: '', model: 'claude-haiku-5-5', firms: '', mapillary: '', relay: '' }, GE.store.get('keys', {}));
 GE.prefs = Object.assign({
   mode: 'user', base: 'satellite', detail: 'ultra', units: 'metric', voice: true,
   labels: true, roads: true, terrain: true, relief: 1, lights: true, sunEverywhere: false, shadows: false, buildings: false,
