@@ -66,9 +66,13 @@ GE.initGlobe = function () {
 
   // light, air, space
   g.enableLighting = true; g.dynamicAtmosphereLighting = true; g.dynamicAtmosphereLightingFromSun = true;
-  g.showGroundAtmosphere = true; g.depthTestAgainstTerrain = true; g.tileCacheSize = GE.isMobile ? 220 : GE.isTablet ? 420 : 500;
+  // No ground haze, and fog that thins out by 780 km (see preRender). Cesium switches fog off above 800 km;
+  // with sunlight at every zoom, the ground haze that takes over there washed the land out, so climbing or
+  // diving through 800 km flashed the whole view brighter or darker in a single frame.
+  g.showGroundAtmosphere = false; g.depthTestAgainstTerrain = true; g.tileCacheSize = GE.isMobile ? 220 : GE.isTablet ? 420 : 500;
   g.baseColor = C.Color.fromCssColorString('#081322'); g.preloadAncestors = true;
   s.skyAtmosphere.show = true; s.fog.enabled = true; s.sun.show = true; s.moon.show = true; s.sun.glowFactor = 1.25;
+  const FOG = s.fog.density;
   s.postProcessStages.fxaa.enabled = GE.isMobile; s.highDynamicRange = false;
   const ssc = s.screenSpaceCameraController; ssc.minimumZoomDistance = 4; ssc.maximumZoomDistance = 7.0e7; ssc.enableCollisionDetection = true;
   v.clock.shouldAnimate = true; v.clock.multiplier = 1;
@@ -139,6 +143,7 @@ GE.initGlobe = function () {
   const RD = { a: 1, last: new C.Cartesian3(), t: 0, moved: -1e9, poll: 0 };
   s.preRender.addEventListener(() => {
     const now = performance.now(), k = cam.positionCartographic;
+    const fw = GE.clamp((7.8e5 - k.height) / 3.8e5, 0, 1); s.fog.density = FOG * fw * fw * (3 - 2 * fw); // full below 400 km, none by 780
     let lift = 0;
     if (GE.prefs.sunEverywhere && GE.prefs.base !== 'night') {
       const fade = 1 - GE.clamp((k.height - 8e4) / (6e5 - 8e4), 0, 1); // the planet from orbit keeps its real night side

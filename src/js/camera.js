@@ -111,12 +111,14 @@ K.hop = (from, p, h, first) => {
   if (d <= 4e5) return { dur: first ? 5.5 : 8, easing: C.EasingFunction.QUADRATIC_IN_OUT };
   return { dur: first ? 7 : GE.clamp(6 + d / 1.5e6, 8, 12), easing: C.EasingFunction.QUINTIC_IN_OUT };
 };
-// ease the clock from one time of day to another over a flight (the planet's light sweeps round with it)
+// ease the clock from one time of day to another over a flight (the planet's light sweeps round with it).
+// Same curve as a long hop: the light holds still while the camera is low at either end, and the hours
+// race by while it cruises high, where the terminator sweeping across the planet looks its best.
 function sweepClock(from, to, ms) {
   if (Math.abs(to - from) < 60000) return;
   const t0 = performance.now();
   const tick = () => {
-    const u = Math.min(1, (performance.now() - t0) / ms), e = u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2;
+    const u = Math.min(1, (performance.now() - t0) / ms), e = u < 0.5 ? 16 * u ** 5 : 1 - (-2 * u + 2) ** 5 / 2;
     GE.time.set(from + (to - from) * e);
     if (u < 1 && K.mode === 'tour') requestAnimationFrame(tick);
   };
