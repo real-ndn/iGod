@@ -1781,14 +1781,22 @@ K.tour = async (opts = {}) => {
   if (!GE.prefs.voice && !opts.quiet) GE.toast("Milo's voice is off. Turn it on in Settings to hear the tour.", 5000);
   const stops = GE.TOUR.map((n) => GE.PLACES.find((p) => p.name === n)).filter(Boolean), H = opts.heights || {};
   for (let i = 0; i < stops.length && K.mode === 'tour'; i++) {
-    const p = stops[i], dur = i ? 8 : 5.5;
+    const p = stops[i], hop = K.hop(cam().positionWC, p, H[p.name], !i);
     GE.setCaption(`${i + 1} / ${stops.length} · ${p.sub}`, p.line); if (!opts.quiet) GE.milo && GE.milo.speak(p.line);
-    if (opts.clock) sweepClock(GE.time.now(), opts.clock(i), dur * 1000);
-    const ok = await K.flyTo({ lon: p.lon, lat: p.lat, h: H[p.name], heading: p.v[0] - 40, pitch: p.v[1], range: p.v[2], duration: dur, easing: C.EasingFunction.QUADRATIC_IN_OUT }, true);
+    if (opts.clock) sweepClock(GE.time.now(), opts.clock(i), hop.dur * 1000);
+    const ok = await K.flyTo({ lon: p.lon, lat: p.lat, h: H[p.name], heading: p.v[0] - 40, pitch: p.v[1], range: p.v[2], duration: hop.dur, easing: hop.easing }, true);
     if (!ok || K.mode !== 'tour') break;
     await K.orbit({ lon: p.lon, lat: p.lat, h: H[p.name] }, { keep: true, ms: 6500, speed: 0.07, range: p.v[2], pitch: p.v[1] * R });
   }
   if (K.mode === 'tour') { K.stop(); if (!opts.quiet) GE.milo && GE.milo.say('That was the tour. Tell me where to go next.'); }
+};
+// How the tour flies to a stop from a point (first: the opening flight). A long hop (from orbit, or across
+// an ocean) climbs high and comes down steeply, so it gets more time and a stronger ease: with the gentle
+// curve it slammed into each view, the height halving from one frame to the next. Short hops are unchanged.
+K.hop = (from, p, h, first) => {
+  const d = C.Cartesian3.distance(from, C.Cartesian3.fromDegrees(p.lon, p.lat, h || 0));
+  if (d <= 4e5) return { dur: first ? 5.5 : 8, easing: C.EasingFunction.QUADRATIC_IN_OUT };
+  return { dur: first ? 7 : GE.clamp(6 + d / 1.5e6, 8, 12), easing: C.EasingFunction.QUINTIC_IN_OUT };
 };
 // ease the clock from one time of day to another over a flight (the planet's light sweeps round with it)
 function sweepClock(from, to, ms) {

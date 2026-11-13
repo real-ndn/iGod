@@ -171,10 +171,14 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
     stops.forEach((p, i) => { const c = sinks(i ? t - 5400000 : t, p); t = i && c - t < 5400000 ? t : c; clocks.push(t); });
     // opening shot: the whole planet, Arizona below
     GE.time.set(clocks[0]); // (and again once the virtual clock starts)
-    GE.camera.setView({ destination: C.Cartesian3.fromDegrees(-112, 31, 1.6e7), orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 } });
-    return { names: stops.map((p) => p.name), heights, clocks };
+    const start = C.Cartesian3.fromDegrees(-112, 31, 1.6e7);
+    GE.camera.setView({ destination: start, orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 } });
+    // how long the tour runs: each flight as the tour flies it, then 6.5 s orbiting each stop
+    let seconds = 0, from = start;
+    stops.forEach((p, i) => { seconds += GE.cam.hop(from, p, heights[p.name], !i).dur + 6.5; from = C.Cartesian3.fromDegrees(p.lon, p.lat, heights[p.name]); });
+    return { names: stops.map((p) => p.name), heights, clocks, seconds };
   }, SUN_ALT);
-  log('heights', JSON.stringify(plan.heights));
+  log('heights', JSON.stringify(plan.heights), `· the tour runs about ${plan.seconds.toFixed(1)} s`);
   log('light', plan.clocks.map((c, i) => `${plan.names[i]} ${new Date(c).toISOString().slice(5, 16)}Z`).join(' · '));
 
   await page.evaluate(() => document.fonts.ready); // label letters are drawn once and kept, so in the right font
@@ -190,8 +194,8 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
     GE.cam.tour({ live: true, quiet: true, heights: plan.heights, clock: (i) => plan.clocks[i] });
   }, plan);
 
-  // this part's stretch of the film (the whole tour runs a little under 114 s)
-  const total = Math.round((seconds || 114) * fps);
+  // this part's stretch of the film
+  const total = Math.round((seconds || plan.seconds) * fps);
   const from = Math.floor((k * total) / N), to = k === N - 1 ? (seconds ? total : Infinity) : Math.floor(((k + 1) * total) / N);
   const t0 = Date.now();
   let n = 0, st = { done: false }, first = null, last = null, low = 0;
