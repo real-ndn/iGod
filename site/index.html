@@ -1902,7 +1902,13 @@ F.load = async () => {
 };
 
 const el = () => $('film'), vid = () => $('filmVideo');
-let raf = 0, next = 0, idleT = 0, startT = 0, landed = null;
+let raf = 0, next = 0, idleT = 0, startT = 0, landed = null, warmed = false;
+const toEnd = (e) => GE.camera.setView({ destination: C.Cartesian3.fromDegrees(e.lon, e.lat, e.height), orientation: { heading: e.heading, pitch: e.pitch, roll: e.roll || 0 } });
+// the last seconds: the live globe loads the closing view behind the film, so it's sharp the moment the film ends
+function warm() {
+  const m = F.meta; warmed = true; if (!m.end) return;
+  GE.viewer.useDefaultRenderLoop = true; toEnd(m.end); GE.scene.requestRender();
+}
 
 function caption(c) {
   const cap = $('filmCap');
@@ -1917,6 +1923,7 @@ function cues() {
     const c = m.chapters[next++]; landed = c.name || landed; caption(c);
     if (c.text) GE.milo && GE.milo.speak(c.text);
   }
+  if (!warmed && m.duration - v.currentTime < 8) warm();
   raf = requestAnimationFrame(cues);
 }
 // the ✕ steps aside while the film plays; a tap or the mouse brings it back for a few seconds
@@ -1931,7 +1938,7 @@ F.play = () => {
   if (F.open || !F.ready()) return;
   const m = F.meta, e = el(), v = vid();
   GE.cam.stop(); GE.cam.set('tour');
-  F.open = true; next = 0; landed = null; caption(null);
+  F.open = true; next = 0; landed = null; warmed = false; caption(null);
   e.hidden = false; e.classList.remove('playing', 'paused', 'idle'); requestAnimationFrame(() => e.classList.add('on'));
   const src = BASE + m.file + '?v=' + encodeURIComponent(m.recorded || '');
   if (v.getAttribute('src') !== src) { v.poster = m.poster ? BASE + m.poster : ''; v.src = src; }
@@ -1958,7 +1965,7 @@ F.close = (finished, quiet) => {
   try { v.pause(); } catch {}
   GE.viewer.useDefaultRenderLoop = true;
   if (finished && m.end) {
-    GE.camera.setView({ destination: C.Cartesian3.fromDegrees(m.end.lon, m.end.lat, m.end.height), orientation: { heading: m.end.heading, pitch: m.end.pitch, roll: m.end.roll || 0 } });
+    toEnd(m.end);
   } else if (!quiet && landed) {
     const p = GE.PLACES.find((x) => x.name === landed); if (p) GE.cam.toPlace(p, { duration: 0 });
   }
