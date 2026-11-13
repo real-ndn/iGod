@@ -152,7 +152,8 @@ GE.initGlobe = function () {
     const dt = (now - RD.t) / 1000, p = cam.positionWC;
     const speed = dt > 0 && dt < 0.6 ? C.Cartesian3.distance(p, RD.last) / dt / Math.max(40, k.height) : 0; // camera heights per second
     C.Cartesian3.clone(p, RD.last); RD.t = now;
-    const flown = (GE.cam.mode && GE.cam.mode !== 'spin') || GE.cam.flying; // the app is flying the camera, not your fingers
+    // the app is flying the camera, not your fingers (filming waits for every tile, so it never needs this)
+    const flown = !GE.recording && ((GE.cam.mode && GE.cam.mode !== 'spin') || GE.cam.flying);
     if (flown && (speed > 0.45 || (speed > 0.22 && now - RD.moved < 500))) RD.moved = now; // hysteresis: no flicker at the threshold
     const settled = now - RD.moved > 400 && (s.globe.tilesLoaded || now - RD.moved > 4000);
     const target = now - RD.moved < 60 ? 0 : settled ? 1 : RD.a;

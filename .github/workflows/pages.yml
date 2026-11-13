@@ -48,6 +48,18 @@ jobs:
           PAGES_URL: ${{ steps.pages.outputs.url }}
         run: python3 scripts/refresh_data.py site
 
+      # The tour film (see record-tour.yml) lives in the "tour" release and is served from tour/.
+      - name: Add the tour film
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site/tour
+          if gh release download tour --dir site/tour --pattern tour.mp4 --pattern tour.json --pattern poster.jpg --clobber; then
+            ls -la site/tour
+          else
+            echo "No tour film yet, so the Tour button flies the tour live in 3D."
+          fi
+
       - name: Publish to the gh-pages branch
         if: steps.pages.outputs.mode != 'workflow'
         env:
@@ -57,9 +69,12 @@ jobs:
           git init -q -b gh-pages
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # what's published now, so unchanged files (the tour film above all) aren't uploaded again
+          git fetch -q --depth 1 origin gh-pages || true
           git add -A
           git commit -q -m "Publish ${GITHUB_SHA::7} with live data from $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          git push -q --force origin HEAD:gh-pages
 
       - if: steps.pages.outputs.mode == 'workflow'
         uses: actions/upload-pages-artifact@v5

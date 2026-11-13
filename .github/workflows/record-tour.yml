@@ -1,0 +1,113 @@
+name: Film the tour
+
+# Films the God's Eye tour on real imagery with tools/record-tour.mjs and puts the film on the site,
+# so the Tour button plays it smoothly on any device instead of flying the tour live in 3D.
+# A software GPU takes seconds to paint each frame, so six machines film six parts at once and a
+# last step joins them. Runs by itself when the recorder changes; to film again after changing the
+# tour, use Actions → Film the tour → Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'Film only the first N seconds, as a trial the site does not use (0 films the whole tour)'
+        required: false
+        default: '0'
+      size:
+        description: 'Frame size'
+        required: false
+        default: '1920x1280'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/record-tour.mjs'
+      - '.github/workflows/record-tour.yml'
+
+permissions:
+  contents: write   # publish the film as the "tour" release
+  actions: write    # then republish the site with it
+
+concurrency:
+  group: record-tour-${{ inputs.seconds || '0' }}   # a trial doesn't stop a full filming, or the other way round
+  cancel-in-progress: true
+
+env:
+  PARTS: 6
+  FILM_SECONDS: ${{ inputs.seconds || '0' }}
+  FILM_SIZE: ${{ inputs.size || '1920x1280' }}
+
+jobs:
+  film:
+    name: Film part ${{ matrix.part }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: true
+      matrix:
+        part: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the browser and ffmpeg
+        run: |
+          node --version
+          npm install --no-save --no-package-lock --no-audit --no-fund playwright@1.63.0
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y -q --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Film part ${{ matrix.part }} of ${{ env.PARTS }}
+        run: node tools/record-tour.mjs site parts --part "${{ matrix.part }}/$PARTS" --size "$FILM_SIZE" --seconds "$FILM_SECONDS"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: part-${{ matrix.part }}
+          path: |
+            parts/part-*.json
+            parts/part-*.mp4
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  publish:
+    name: Join and publish
+    needs: film
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: part-*
+          path: parts
+          merge-multiple: true
+
+      - name: Join the parts into the film
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends ffmpeg fonts-dejavu-core
+          node tools/record-tour.mjs --assemble parts tour-out
+          ls -la tour-out
+
+      - name: Publish the film as the "tour" release
+        if: env.FILM_SECONDS == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view tour >/dev/null 2>&1 || gh release create tour --title "Tour film" --latest=false \
+            --notes "The God's Eye tour, filmed on real imagery by tools/record-tour.mjs. The site plays it when you tap Tour."
+          gh release upload tour tour-out/tour.mp4 tour-out/tour.json tour-out/poster.jpg --clobber
+
+      - name: Republish the site with the film
+        if: env.FILM_SECONDS == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main
+
+      - name: Keep the trial for checking (the site doesn't use it)
+        if: env.FILM_SECONDS != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view tour-trial >/dev/null 2>&1 || gh release create tour-trial --title "Tour film (trial)" --latest=false --prerelease \
+            --notes "A short trial of the tour film, for checking. The site doesn't use it."
+          gh release upload tour-trial tour-out/tour.mp4 tour-out/tour.json tour-out/poster.jpg --clobber

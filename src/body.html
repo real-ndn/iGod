@@ -148,5 +148,12 @@
   <div id="miloCap" class="glass" aria-live="polite"></div>
 </div>
 
+<div id="film" hidden role="dialog" aria-label="God's Eye tour">
+  <video id="filmVideo" playsinline webkit-playsinline muted preload="none" disablepictureinpicture></video>
+  <div id="filmWait">Loading the tour</div>
+  <div id="filmCap" aria-live="polite"></div>
+  <div id="filmPaused" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg></div>
+  <button id="filmClose" class="fbtn" aria-label="End the tour"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+</div>
 <div id="toast" class="ui glass" role="status"></div>
 <div id="credits"></div>

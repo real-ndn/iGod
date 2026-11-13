@@ -7,6 +7,7 @@ const LIB_HOSTS = ['cesium.com', 'fonts.googleapis.com', 'fonts.gstatic.com', 'u
 self.addEventListener('fetch', (e) => {
   const req = e.request; if (req.method !== 'GET') return;
   const u = new URL(req.url);
+  if (req.headers.has('range') || /\.(mp4|m4v|mov)$/i.test(u.pathname)) return; // video streams in byte ranges; the browser handles those best
   if (u.origin === location.origin) {
     // network first so new builds and refreshed live data win; cache is the offline fallback.
     // The page itself is revalidated every time (a cheap 304 when unchanged), so an update shows on the next open.

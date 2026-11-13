@@ -247,6 +247,28 @@ body.touring #top, body.touring #nav, body.touring #card, body.touring #ribbon, 
 #caption { position: fixed; z-index: 9; left: 50%; bottom: calc(9vh + 20px); transform: translateX(-50%); width: min(760px, calc(100% - 40px)); text-align: center; font: 500 clamp(16px, 2.1vw, 23px)/1.35 var(--f-ui); text-shadow: 0 2px 14px #000; text-wrap: balance; pointer-events: none; transition: opacity .6s; }
 #caption small { display: block; margin-bottom: 6px; font: 500 10.5px var(--f-data); letter-spacing: .2em; text-transform: uppercase; color: var(--gold); }
 
+/* filming the tour (tools/record-tour.mjs): only the globe and the imagery credits */
+body.recording > :not(#globe):not(#credits) { display: none !important; }
+body.recording #credits { font-size: 12px; color: rgba(236, 241, 248, .62); opacity: 1; right: 18px; bottom: 10px; max-width: 60vw; }
+
+/* the recorded tour, played full screen */
+#film { position: fixed; inset: 0; z-index: 60; background: #000; opacity: 0; transition: opacity .7s; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+#film.on { opacity: 1; }
+#film video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+@media (orientation: portrait) { #film video { object-fit: cover; } }
+#filmCap { position: absolute; left: 50%; bottom: calc(var(--sb) + 7vh); transform: translateX(-50%); width: min(780px, calc(100% - 40px)); text-align: center; font: 500 clamp(17px, 2.3vw, 25px)/1.35 var(--f-ui); color: #fff; text-shadow: 0 2px 16px #000, 0 0 3px rgba(0, 0, 0, .6); text-wrap: balance; pointer-events: none; opacity: 0; transition: opacity .6s; }
+#filmCap.on { opacity: 1; }
+#filmCap small { display: block; margin-bottom: 7px; font: 500 11px var(--f-data); letter-spacing: .2em; text-transform: uppercase; color: var(--gold); }
+#film .fbtn { position: absolute; top: calc(var(--st) + 10px); width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; color: var(--ink); background: rgba(9, 13, 23, .62); border: 1px solid var(--line-hi); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); transition: opacity .5s; cursor: pointer; }
+#filmClose { right: calc(var(--sr) + 4px); }
+#film .fbtn svg { width: 20px; height: 20px; }
+#film.idle .fbtn { opacity: 0; pointer-events: none; }
+#filmPaused { position: absolute; left: 50%; top: 50%; width: 76px; height: 76px; margin: -38px 0 0 -38px; border-radius: 50%; display: grid; place-items: center; background: rgba(9, 13, 23, .55); border: 1px solid var(--line-hi); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); opacity: 0; transform: scale(.9); transition: opacity .3s, transform .3s; pointer-events: none; }
+#film.paused #filmPaused { opacity: 1; transform: none; }
+#filmPaused svg { width: 30px; height: 30px; color: #fff; }
+#filmWait { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font: 500 11px var(--f-data); letter-spacing: .2em; text-transform: uppercase; color: var(--mute); transition: opacity .4s; pointer-events: none; }
+#film.playing #filmWait { opacity: 0; }
+
 /* measure */
 #measure { left: 50%; top: calc(var(--st) + 56px); transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; font: 500 13px var(--f-data); }
 

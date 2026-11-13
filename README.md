@@ -66,6 +66,18 @@ Nothing needs setting up. If you ever switch Settings → Pages → Source to **
 
 **Optional:** for wildfires, go to Settings → Secrets and variables → Actions and add a secret named `FIRMS_MAP_KEY` holding your FIRMS map key.
 
+## The tour film
+
+Tap **Tour** and God's Eye plays a film of the tour, recorded ahead of time on the real imagery, so it plays smoothly on any device. Milo narrates over it live, captions follow along, and when it ends the live globe is waiting exactly where the film stops. Tap the film to show the ✕, and tap again to pause. The ✕ ends the tour at the stop on screen. If the film can't load, the tour flies live in 3D instead, and asking Milo for the "live tour" always does.
+
+`.github/workflows/record-tour.yml` makes the film with `tools/record-tour.mjs`:
+
+- It opens the site in a headless browser on a virtual clock and flies the tour frame by frame, at 30 frames a second and 1920 × 1280.
+- No frame is kept until every map tile in view has loaded. The sun is in late-afternoon light at every stop.
+- Six machines film six parts at once. A last step joins them and publishes `tour.mp4`, `tour.json` and `poster.jpg` as the `tour` release. The site picks them up from there.
+
+To film it again, for instance after changing the tour, open **Actions → Film the tour → Run workflow**. It also runs by itself when the recorder changes. On your own computer: `npm install playwright`, `npx playwright install chromium`, then `node tools/record-tour.mjs site tour-out` (needs ffmpeg).
+
 ## Build
 
 ```sh

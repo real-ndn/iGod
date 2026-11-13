@@ -145,7 +145,8 @@ async function describe() {
 async function local(text) {
   const t = text.toLowerCase().trim();
   if (/^(stop|cancel|halt|enough|pause)\b/.test(t)) { GE.cam.stop(); milo.stopVoice(); return 'Stopped. You have the controls.'; }
-  if (/\btour\b|show me around/.test(t)) { GE.cam.tour(); return 'Rolling the tour. Touch anywhere to take over.'; }
+  if (/\b(live|3d|real[- ]?time) tour\b/.test(t)) { GE.cam.tour({ live: true }); return 'Flying the tour live, in 3D. Touch anywhere to take over.'; }
+  if (/\btour\b|show me around/.test(t)) { GE.cam.tour(); return GE.tourFilm && GE.tourFilm.ready() ? 'Rolling the tour.' : 'Rolling the tour. Touch anywhere to take over.'; }
   if (/\b(ride|board|fly with|follow)\b.*\b(iss|space station|hubble|satellite)/.test(t) || /^(the )?iss\b/.test(t)) { const n = await ride(/hubble/.test(t) ? 'hubble' : 'iss'); return n ? `Riding with ${n}. That's real orbital speed.` : 'I could not reach the satellite catalog.'; }
   let m = t.match(/(?:drive|route|directions|road trip)(?: me)?(?: from (.+?))? to (.+)$/);
   if (m) return routeCmd(m[1], m[2]);

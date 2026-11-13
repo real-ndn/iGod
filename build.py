@@ -7,7 +7,7 @@
 import json, pathlib, shutil
 root = pathlib.Path(__file__).resolve().parent
 src = root / 'src'
-order = ['core', 'globe', 'live', 'labels', 'history', 'draw', 'street', 'camera', 'ui', 'panels', 'milo', 'main']
+order = ['core', 'globe', 'live', 'labels', 'history', 'draw', 'street', 'camera', 'tourfilm', 'ui', 'panels', 'milo', 'main']
 js = '\n'.join((src / 'js' / f'{n}.js').read_text() for n in order)
 data = {'labels': json.loads((src / 'data' / 'labels.json').read_text()), 'borders': json.loads((src / 'data' / 'borders.json').read_text())}
 HOSTED = 'https://real-ndn.github.io/iGod/'

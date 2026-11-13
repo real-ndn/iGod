@@ -24,6 +24,7 @@
     GE.camera.setView({ destination: Cesium.Cartesian3.fromDegrees(((subLon - 72 + 540) % 360) - 180, 18, 2.25e7) });
   }
   GE.ribbon.init();
+  GE.tourFilm.init();
   GE.camera.moveEnd.addEventListener(() => { GE.ui.writeHash(); GE.ui.status(); });
   GE.camera.changed.addEventListener(() => GE.ui.status());
 
@@ -31,6 +32,7 @@
   const finish = () => {
     if (done) return; done = true; $('boot').classList.add('gone'); setTimeout(() => $('boot').remove(), 1000);
     GE.ui.status(); GE.milo.greet();
+    if (location.protocol !== 'file:') GE.tourFilm.load(); // the recorded tour, if one is published
     if (!fromLink && !GE.cam.mode && !GE.touched) GE.cam.spin(); // idle drift until the first touch
   };
   GE.scene.globe.tileLoadProgressEvent.addEventListener((n) => { if (n === 0) setTimeout(finish, 300); });

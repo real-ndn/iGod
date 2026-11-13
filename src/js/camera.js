@@ -79,18 +79,38 @@ K.dive = async (p) => {
   if (K.mode === 'dive') K.orbit({ lon: p.lon, lat: p.lat }, { pitch: -0.32, speed: 0.06 });
 };
 
-K.tour = async () => {
+// The tour. When a recorded film of it is published with the site, the Tour button plays that instead
+// (smooth on any device: see tourfilm.js). This is the live 3D version, and what the recorder films.
+//   opts.live     skip the film
+//   opts.quiet    no voice, no toasts (filming)
+//   opts.heights  { stop name: metres }, so no stop waits on the network
+//   opts.clock(i) the time of day to arrive at stop i; the sun sweeps there during the flight
+K.tour = async (opts = {}) => {
+  if (!opts.live && GE.tourFilm && GE.tourFilm.ready()) return GE.tourFilm.play();
   K.stop(); K.set('tour'); document.body.classList.add('touring');
-  if (!GE.prefs.voice) GE.toast("Milo's voice is off. Turn it on in Settings to hear the tour.", 5000);
-  const stops = GE.TOUR.map((n) => GE.PLACES.find((p) => p.name === n)).filter(Boolean);
+  if (!GE.prefs.voice && !opts.quiet) GE.toast("Milo's voice is off. Turn it on in Settings to hear the tour.", 5000);
+  const stops = GE.TOUR.map((n) => GE.PLACES.find((p) => p.name === n)).filter(Boolean), H = opts.heights || {};
   for (let i = 0; i < stops.length && K.mode === 'tour'; i++) {
-    const p = stops[i]; GE.setCaption(`${i + 1} / ${stops.length} · ${p.sub}`, p.line); GE.milo && GE.milo.speak(p.line);
-    const ok = await K.flyTo({ lon: p.lon, lat: p.lat, heading: p.v[0] - 40, pitch: p.v[1], range: p.v[2], duration: i ? 8 : 5.5, easing: C.EasingFunction.QUADRATIC_IN_OUT }, true);
+    const p = stops[i], dur = i ? 8 : 5.5;
+    GE.setCaption(`${i + 1} / ${stops.length} · ${p.sub}`, p.line); if (!opts.quiet) GE.milo && GE.milo.speak(p.line);
+    if (opts.clock) sweepClock(GE.time.now(), opts.clock(i), dur * 1000);
+    const ok = await K.flyTo({ lon: p.lon, lat: p.lat, h: H[p.name], heading: p.v[0] - 40, pitch: p.v[1], range: p.v[2], duration: dur, easing: C.EasingFunction.QUADRATIC_IN_OUT }, true);
     if (!ok || K.mode !== 'tour') break;
-    await K.orbit({ lon: p.lon, lat: p.lat }, { keep: true, ms: 6500, speed: 0.07, range: p.v[2], pitch: p.v[1] * R });
+    await K.orbit({ lon: p.lon, lat: p.lat, h: H[p.name] }, { keep: true, ms: 6500, speed: 0.07, range: p.v[2], pitch: p.v[1] * R });
   }
-  if (K.mode === 'tour') { K.stop(); GE.milo && GE.milo.say('That was the tour. Tell me where to go next.'); }
+  if (K.mode === 'tour') { K.stop(); if (!opts.quiet) GE.milo && GE.milo.say('That was the tour. Tell me where to go next.'); }
 };
+// ease the clock from one time of day to another over a flight (the planet's light sweeps round with it)
+function sweepClock(from, to, ms) {
+  if (Math.abs(to - from) < 60000) return;
+  const t0 = performance.now();
+  const tick = () => {
+    const u = Math.min(1, (performance.now() - t0) / ms), e = u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2;
+    GE.time.set(from + (to - from) * e);
+    if (u < 1 && K.mode === 'tour') requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
 
 // Ride along with a satellite: first-person from orbit, looking down the ground track.
 K.ride = (s) => {
