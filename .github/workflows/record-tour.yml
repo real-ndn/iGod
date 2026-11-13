@@ -2,8 +2,8 @@ name: Film the tour
 
 # Films the God's Eye tour on real imagery with tools/record-tour.mjs and puts the film on the site,
 # so the Tour button plays it smoothly on any device instead of flying the tour live in 3D.
-# A software GPU takes seconds to paint each frame, so six machines film six parts at once and a
-# last step joins them. Runs by itself when the recorder changes; to film again after changing the
+# A software GPU takes seconds to paint each frame, so twelve machines film twelve parts at once and
+# a last step joins them. Runs by itself when the recorder changes; to film again after changing the
 # tour, use Actions → Film the tour → Run workflow.
 
 on:
@@ -32,7 +32,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PARTS: 6
+  PARTS: 12
   FILM_SECONDS: ${{ inputs.seconds || '0' }}
   FILM_SIZE: ${{ inputs.size || '1920x1280' }}
 
@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        part: [0, 1, 2, 3, 4, 5]
+        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v7
 

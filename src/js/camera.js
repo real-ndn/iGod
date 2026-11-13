@@ -13,7 +13,10 @@ function loop(fn) {
 const lerpAng = (a, b, t) => { let d = b - a; d = Math.atan2(Math.sin(d), Math.cos(d)); return a + d * t; };
 // How far a flown camera sits below the safe height over the terrain under it (0 when clear).
 // Target heights can arrive late or coarse, and a camera inside a hill renders black.
+// Not while filming: which terrain tiles happen to be loaded under the camera varies from run to run,
+// and the film's parts, made on different machines, must put the camera in exactly the same place.
 const below = (margin = 70) => {
+  if (GE.recording) return 0;
   const k = cam().positionCartographic, g = GE.scene.globe.show ? GE.scene.globe.getHeight(k) : null;
   return g == null ? 0 : Math.max(0, g * (GE.scene.verticalExaggeration || 1) + margin - k.height);
 };

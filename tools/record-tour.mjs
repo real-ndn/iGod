@@ -6,8 +6,8 @@
 // however slow the machine or the network. GitHub Actions runs this: .github/workflows/record-tour.yml.
 //
 // A software GPU takes seconds to paint a frame, so the tour is filmed in parts, on several machines
-// at once. Every part flies the whole tour from the start on the same clock and loads the same tiles,
-// so the camera is in exactly the same place, but only paints its own stretch. --assemble joins them.
+// at once. Every part flies the whole tour from the start on the same clock, so the camera is in exactly
+// the same place, but only loads and paints its own stretch. --assemble joins them.
 //
 //   node tools/record-tour.mjs [siteDir=site] [outDir=tour-out] [--fps 30] [--size 1920x1280] [--seconds N] [--part K/N] [--no-encode]
 //   node tools/record-tour.mjs --assemble partsDir [outDir=tour-out]
@@ -22,10 +22,11 @@ import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 // The look of the film, whatever the viewer's own settings: late-afternoon sun, labels, roads and
-// borders on, live layers off, terrain at 1.5x, Milo silent (the app narrates live over the film).
+// borders on, live layers off, true relief (the stops' views are framed for it), Milo silent (the app
+// narrates live over the film).
 export const FILM_PREFS = {
   mode: 'user', base: 'satellite', detail: 'ultra', vision: 'normal', voice: false,
-  labels: true, roads: true, borders: true, terrain: true, relief: 1.5, lights: true, sunEverywhere: true, shadows: false, buildings: false,
+  labels: true, roads: true, borders: true, terrain: true, relief: 1, lights: true, sunEverywhere: true, shadows: false, buildings: false,
   sats: false, starlink: false, flights: false, quakes: false, events: false, fires: false,
 };
 export const SUN_ALT = 12; // degrees: the sun this high, and sinking, at every stop
@@ -108,13 +109,17 @@ export function virtualClock({ prefs, fps }) {
       vt += 1000 / fps;
       const due = [...queue.values()]; queue.clear();
       for (const cb of due) { try { cb(vt); } catch (e) { console.error('frame callback', e); } }
-      const r = await this.settle(45000, keep, keep);
-      const net = window.Cesium.RequestScheduler.statistics; // tiles asked for, and how many the servers refused
-      return { done: !window.GE.cam.mode, t: this.t(), stuck: this.stuck, cam: this.cam(), fetched: net.numberOfActiveRequestsEver, failed: net.numberOfFailedRequests, ...r };
+      // flying ahead: nothing about the camera's path depends on the globe, so one quick draw moves everything on
+      const r = keep ? await this.settle() : this.skip();
+      const GE = window.GE, net = window.Cesium.RequestScheduler.statistics; // tiles asked for, and how many the servers refused
+      const k = GE.camera.positionCartographic, g = keep ? GE.scene.globe.getHeight(k) : null;
+      const low = g != null && k.height < g * (GE.scene.verticalExaggeration || 1) + 25; // the camera within 25 m of the ground
+      return { done: !GE.cam.mode, t: this.t(), stuck: this.stuck, cam: this.cam(), low, fetched: net.numberOfActiveRequestsEver, failed: net.numberOfFailedRequests, ...r };
     },
+    skip() { const S = window.GE.scene; S.debugCommandFilter = blank; window.GE.viewer.render(); S.debugCommandFilter = undefined; return { draws: 1, painted: 0, waited: 0, late: 0, img: '' }; },
     cam() { const c = window.GE.camera, k = c.positionCartographic, R = 180 / Math.PI; return { lon: k.longitude * R, lat: k.latitude * R, height: k.height, heading: c.heading, pitch: c.pitch, roll: c.roll }; },
-    // flying ahead, even the antialiasing pass is skipped: those draws are never seen
-    ahead(on) { window.GE.scene.postProcessStages.fxaa.enabled = !on; },
+    // flying ahead, the globe isn't even loaded: those draws are never seen
+    ahead(on) { const S = window.GE.scene; S.postProcessStages.fxaa.enabled = !on; S.globe.show = !on; },
   };
 }
 
@@ -129,10 +134,26 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
     document.body.classList.add('recording'); GE.recording = true; GE.touched = true;
     GE.cam.stop(); GE.scene.requestRenderMode = false;
     GE.scene.msaaSamples = 1; GE.scene.postProcessStages.fxaa.enabled = true; GE.scene.globe.maximumScreenSpaceError = 1.6;
+    // The parts are filmed on different machines and must join exactly, so the camera's path can't
+    // depend on which terrain tiles happen to be loaded: Cesium's own terrain clamp is off (the app's
+    // is too, while GE.recording). The tour's views keep well clear of the ground anyway.
+    GE.scene.screenSpaceCameraController.enableCollisionDetection = false;
     const stops = GE.TOUR.map((n) => GE.PLACES.find((p) => p.name === n)).filter(Boolean);
-    // heights first, so no flight waits on the network mid-film
+    // each stop's ground height at full detail, however long the network takes, so no flight waits on
+    // it mid-film and every part flies to exactly the same spots
+    const exact = async (p) => {
+      for (let i = 0; i < 6; i++) {
+        try {
+          const h = GE.terrainKind === 'terrarium' ? await GE.terra.sample(p.lon, p.lat, 14)
+            : (await C.sampleTerrainMostDetailed(GE.scene.terrainProvider, [C.Cartographic.fromDegrees(p.lon, p.lat)]))[0].height;
+          if (h && isFinite(h)) return h;
+        } catch {}
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      return GE.heightAt(p.lon, p.lat);
+    };
     const heights = {};
-    for (const p of stops) heights[p.name] = await GE.heightAt(p.lon, p.lat);
+    for (const p of stops) heights[p.name] = await exact(p);
     // the light: at each stop, the moment the sun sinks through SUN_ALT, time only moving forward.
     // Neighbouring stops share a moment; between continents the light sweeps round with the flight.
     const alt = (t, p) => GE.sun.altAz(t, p.lat, p.lon).alt;
@@ -162,9 +183,9 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
   const total = Math.round((seconds || 114) * fps);
   const from = Math.floor((k * total) / N), to = k === N - 1 ? (seconds ? total : Infinity) : Math.floor(((k + 1) * total) / N);
   const t0 = Date.now();
-  let n = 0, st = { done: false }, first = null, last = null;
+  let n = 0, st = { done: false }, first = null, last = null, low = 0;
   if (from) {
-    log(`part ${k + 1} of ${N}: frames ${from} to ${Number.isFinite(to) ? to - 1 : 'the end'}. Flying ahead to frame ${from} first, loading everything but painting nothing`);
+    log(`part ${k + 1} of ${N}: frames ${from} to ${Number.isFinite(to) ? to - 1 : 'the end'}. Flying ahead to frame ${from} first, without loading or painting anything`);
     await page.evaluate(() => window.__film.ahead(true));
     while (n < from && !st.done) {
       st = await page.evaluate(() => window.__film.frame(false)); n++;
@@ -177,7 +198,7 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
   while (!st.done && n < to) {
     st = await page.evaluate(() => window.__film.frame());
     fs.writeFileSync(path.join(frames, String(n).padStart(5, '0') + '.jpg'), Buffer.from(st.img.slice(st.img.indexOf(',') + 1), 'base64'));
-    first = first || st.cam; last = st.cam;
+    first = first || st.cam; last = st.cam; if (st.low) low++;
     n++; if (onFrame) onFrame(n, st);
     const kept = n - from;
     if (kept % (fps * 2) === 0) {
@@ -189,8 +210,9 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
   const next = !st.done && Number.isFinite(to) ? (await page.evaluate(() => window.__film.frame(false))).cam : null;
   const captions = await page.evaluate(() => window.__film.captions);
   const kept = Math.max(0, n - from);
-  log(`part ${k + 1} of ${N}: filmed ${kept} frames in ${Math.round((Date.now() - t0) / 60000)} min` + (st.done ? ', to the end of the tour' : '') + ` · ${st.fetched} tiles fetched, ${st.failed} failed` + (st.stuck ? ` · ${st.stuck} frames went out with an image still loading` : ''));
-  return { part: k, of: N, fps, from, frames: kept, done: !!st.done, names: plan.names, captions, first, last, next, dir: frames };
+  log(`part ${k + 1} of ${N}: filmed ${kept} frames in ${Math.round((Date.now() - t0) / 60000)} min` + (st.done ? ', to the end of the tour' : '') + ` · ${st.fetched} tiles fetched, ${st.failed} failed`
+    + (st.stuck ? ` · ${st.stuck} frames went out with an image still loading` : '') + (low ? ` · ${low} frames with the camera within 25 m of the ground` : ''));
+  return { part: k, of: N, fps, from, frames: kept, done: !!st.done, names: plan.names, heights: plan.heights, captions, first, last, next, low, dir: frames };
 }
 
 // One part's frames, encoded nearly losslessly for --assemble, and what it needs to know about them.
@@ -218,15 +240,18 @@ function gap(a, b) {
 export function assemble(dir, outDir, log = console.log) {
   const parts = fs.readdirSync(dir).filter((f) => /^part-\d+\.json$/.test(f)).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))).sort((a, b) => a.part - b.part);
   if (!parts.length) throw new Error('no parts in ' + dir);
-  const N = parts[0].of;
+  const N = parts[0].of, warn = (m) => log(process.env.GITHUB_ACTIONS ? `::warning::${m}` : `warning: ${m}`);
   if (parts.length !== N || parts.some((p, i) => p.part !== i)) throw new Error(`expected ${N} parts, found ${parts.map((p) => p.part).join(', ')}`);
+  for (const p of parts) if (JSON.stringify(p.heights) !== JSON.stringify(parts[0].heights)) warn(`part ${p.part + 1} measured different ground heights at the stops, so its camera path differs`);
+  const low = parts.reduce((s, p) => s + (p.low || 0), 0);
+  if (low) warn(`${low} frames have the camera within 25 m of the ground`);
   for (let i = 1; i < N; i++) {
     const a = parts[i - 1], b = parts[i];
     if (!b.frames) continue; // the tour ended before this part's stretch
     if (a.from + a.frames !== b.from) throw new Error(`part ${i + 1} starts at frame ${b.from}, but part ${i} stopped at frame ${a.from + a.frames}`);
     const d = gap(a.next, b.first);
     log(`seam ${i}: the camera is ${d.m.toFixed(3)} m and ${d.deg.toFixed(4)}° from where part ${i} left it`);
-    if (d.m > 0.5 || d.deg > 0.05) log(`warning: the camera jumps at the start of part ${i + 1}`);
+    if (d.m > 0.5 || d.deg > 0.05) warn(`the camera jumps ${d.m.toFixed(1)} m at the start of part ${i + 1}`);
   }
   const filmed = parts.filter((p) => p.frames), final = parts[N - 1], fps = final.fps;
   if (!filmed.length) throw new Error('no frames filmed');
@@ -238,7 +263,7 @@ export function assemble(dir, outDir, log = console.log) {
   const chapters = final.captions.filter((c) => c.text).map((c) => ({ t: +c.t.toFixed(3), name: final.names[i++], eyebrow: c.eyebrow, text: c.text }));
   const frames = filmed.reduce((s, p) => s + p.frames, 0), duration = +(frames / fps).toFixed(3);
   const gc = chapters.find((c) => c.name === 'Grand Canyon') || chapters[Math.floor(chapters.length / 2)];
-  const posterT = Math.min(duration - 1 / fps, (gc ? gc.t : duration / 2) + 11);
+  const posterT = Math.max(0, Math.min(duration - 0.5, (gc ? gc.t : duration / 2) + 11));
   const desc = {
     v: 1, file: 'tour.mp4', poster: 'poster.jpg', fps, width: final.width, height: final.height, frames, duration,
     recorded: new Date().toISOString(), light: `sun ${SUN_ALT}° above the horizon at each stop`, chapters, end: filmed[filmed.length - 1].last,
@@ -263,7 +288,8 @@ export function encode(list, outDir, desc, posterT, log = console.log) {
   let r = run(21, '5M');
   if (r.status !== 0) throw new Error('ffmpeg failed');
   if (fs.statSync(out).size > 92e6) { log('over 92 MB, encoding again a little smaller'); r = run(24, '3.8M'); if (r.status !== 0) throw new Error('ffmpeg failed'); }
-  spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-ss', posterT.toFixed(3), '-i', out, '-frames:v', '1', '-vf', 'scale=1280:-2', '-q:v', '3', poster], { stdio: 'inherit' });
+  const still = (t) => { fs.rmSync(poster, { force: true }); spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-ss', t.toFixed(3), '-i', out, '-frames:v', '1', '-vf', 'scale=1280:-2', '-q:v', '3', poster], { stdio: 'inherit' }); return fs.existsSync(poster); };
+  if (!still(posterT) && !still(desc.duration / 2) && !still(0)) throw new Error('could not take the poster frame');
   log(`tour.mp4 ${(fs.statSync(out).size / 1e6).toFixed(1)} MB, ${desc.duration} s`);
 }
 

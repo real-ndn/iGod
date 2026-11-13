@@ -74,7 +74,7 @@ Tap **Tour** and God's Eye plays a film of the tour, recorded ahead of time on t
 
 - It opens the site in a headless browser on a virtual clock and flies the tour frame by frame, at 30 frames a second and 1920 × 1280.
 - No frame is kept until every map tile in view has loaded. The sun is in late-afternoon light at every stop.
-- Six machines film six parts at once. A last step joins them and publishes `tour.mp4`, `tour.json` and `poster.jpg` as the `tour` release. The site picks them up from there.
+- Twelve machines film twelve parts at once. Each flies the whole tour on the same clock, so the camera is in exactly the same place where the parts meet. A last step joins them and publishes `tour.mp4`, `tour.json` and `poster.jpg` as the `tour` release. The site picks them up from there.
 
 To film it again, for instance after changing the tour, open **Actions → Film the tour → Run workflow**. It also runs by itself when the recorder changes. On your own computer: `npm install playwright`, `npx playwright install chromium`, then `node tools/record-tour.mjs site tour-out` (needs ffmpeg).
 

@@ -103,7 +103,8 @@ LB.update = () => {
     const inView = (e) => !(e.lat < so || e.lat > no || (wraps ? e.lon < w && e.lon > ea : e.lon < w || e.lon > ea));
     const onGround = (e) => { // close to the ground, lift labels onto the terrain so they sit on the right spot when tilted
       if (camH >= 4e5) return e.pos;
-      const now = performance.now(); if (!e.hp || now - e.ht > 4000) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } }
+      // filming re-seats every draw, so a label sits on the terrain that finished loading for that frame
+      const now = performance.now(); if (!e.hp || now - e.ht > (GE.recording ? -1 : 4000)) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } }
       return e.hp || e.pos;
     };
     // live layers claim their space first, nearest first, and only once you're regional (no wall of text from orbit)
