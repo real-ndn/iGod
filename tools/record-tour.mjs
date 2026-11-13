@@ -37,7 +37,11 @@ export function virtualClock({ prefs, fps }) {
   try { localStorage.setItem('ge.prefs', JSON.stringify(prefs)); } catch {}
   const perf = window.performance, realNow = perf.now.bind(perf), realDate = Date.now.bind(Date);
   const realRAF = window.requestAnimationFrame.bind(window), realCAF = window.cancelAnimationFrame.bind(window);
-  let on = false, vt = 0, epoch = 0, seq = 1;
+  // The virtual clock starts at the same moment on every machine and counts whole frames, so every
+  // part does exactly the same arithmetic: a flight that ends right on a frame ends on the same frame
+  // everywhere (from the page's own start time, rounding could tip it either way).
+  const VT0 = 1e8;
+  let on = false, vt = 0, epoch = 0, seq = 1, n = 0;
   const queue = new Map();
   perf.now = () => (on ? vt : realNow());
   Date.now = () => (on ? epoch + vt : realDate());
@@ -48,8 +52,8 @@ export function virtualClock({ prefs, fps }) {
   const blank = () => false; // a draw that updates and loads everything but paints nothing
   window.__film = {
     fps,
-    start() { vt = realNow(); epoch = realDate() - vt; on = true; this.t0 = vt; },
-    t: () => (vt - window.__film.t0) / 1000,
+    start() { vt = VT0; n = 0; epoch = realDate() - vt; on = true; },
+    t: () => (vt - VT0) / 1000,
     // Draw until a frame comes out with every tile in view loaded, at most `cap` ms, and hand back
     // that frame, read straight off the canvas in the same breath as it's drawn (no waiting on the
     // page compositor, which a software GPU makes slow).
@@ -58,7 +62,7 @@ export function virtualClock({ prefs, fps }) {
     // is already loaded is painted at once.
     // paintable false: flying ahead to another part's stretch. Everything loads as usual (so the camera,
     // which keeps clear of the terrain it can see, goes exactly where it would), but nothing is painted.
-    async settle(cap = 45000, grab = true, paintable = true) {
+    async settle(cap = 120000, grab = true, paintable = true) {
       const GE = window.GE, S = GE.scene, v = GE.viewer, g = S.globe, t0 = realNow();
       let paint = paintable && this.warm, painted = 0;
       for (let draws = 1; ; draws++) {
@@ -69,17 +73,17 @@ export function virtualClock({ prefs, fps }) {
         // draws at most, and never again for an image that is stuck for good)
         const late = paintable ? this.pending() : 0, waitLate = late > 0 && draws <= 8 && this.stuck < 30;
         if (late && loaded && !waitLate) this.stuck++;
-        const ready = (loaded && !waitLate) || realNow() - t0 > cap;
+        const timedOut = !(loaded && !waitLate) && realNow() - t0 > cap, ready = (loaded && !waitLate) || timedOut;
         if (draws === 1 && paintable) this.warm = ready; // ready at the first look: the next frame probably will be too, so paint it straight away
         if (ready && (paint || !paintable)) {
           S.debugCommandFilter = undefined;
-          return { waited: Math.round(realNow() - t0), draws, painted, late, img: grab && paint ? S.canvas.toDataURL('image/jpeg', 0.93) : '' };
+          return { waited: Math.round(realNow() - t0), draws, painted, late, timedOut, img: grab && paint ? S.canvas.toDataURL('image/jpeg', 0.93) : '' };
         }
         paint = ready; // everything's in: draw it for real
         if (!ready) await display();
       }
     },
-    stuck: 0, warm: false,
+    stuck: 0, warm: false, timeouts: 0,
     // Letters and markers on screen whose image hasn't reached the GPU yet. Label letters are drawn
     // into a shared texture during one draw and only show from a later one, so without this a new
     // label flashes in with letters missing.
@@ -106,17 +110,22 @@ export function virtualClock({ prefs, fps }) {
     // one frame: time moves on, everything animated takes its step, the globe loads and is drawn
     // (keep false: flying ahead, nothing painted)
     async frame(keep = true) {
-      vt += 1000 / fps;
+      vt = VT0 + (++n * 1000) / fps;
       const due = [...queue.values()]; queue.clear();
       for (const cb of due) { try { cb(vt); } catch (e) { console.error('frame callback', e); } }
+      // Let everything those steps set off happen before the first draw (the next stop's flight is started
+      // from a promise). Otherwise a flight's clock starts on whichever draw comes first, which differs
+      // between a part that is filming and one that is flying ahead, and the parts no longer meet exactly.
+      await new Promise((r) => setTimeout(r, 0));
       // flying ahead: nothing about the camera's path depends on the globe, so one quick draw moves everything on
       const r = keep ? await this.settle() : this.skip();
+      if (r.timedOut) this.timeouts++;
       const GE = window.GE, net = window.Cesium.RequestScheduler.statistics; // tiles asked for, and how many the servers refused
       const k = GE.camera.positionCartographic, g = keep ? GE.scene.globe.getHeight(k) : null;
       const low = g != null && k.height < g * (GE.scene.verticalExaggeration || 1) + 25; // the camera within 25 m of the ground
-      return { done: !GE.cam.mode, t: this.t(), stuck: this.stuck, cam: this.cam(), low, fetched: net.numberOfActiveRequestsEver, failed: net.numberOfFailedRequests, ...r };
+      return { done: !GE.cam.mode, t: this.t(), stuck: this.stuck, timeouts: this.timeouts, cam: this.cam(), low, fetched: net.numberOfActiveRequestsEver, failed: net.numberOfFailedRequests, ...r };
     },
-    skip() { const S = window.GE.scene; S.debugCommandFilter = blank; window.GE.viewer.render(); S.debugCommandFilter = undefined; return { draws: 1, painted: 0, waited: 0, late: 0, img: '' }; },
+    skip() { const S = window.GE.scene; S.debugCommandFilter = blank; window.GE.viewer.render(); S.debugCommandFilter = undefined; return { draws: 1, painted: 0, waited: 0, late: 0, timedOut: false, img: '' }; },
     cam() { const c = window.GE.camera, k = c.positionCartographic, R = 180 / Math.PI; return { lon: k.longitude * R, lat: k.latitude * R, height: k.height, heading: c.heading, pitch: c.pitch, roll: c.roll }; },
     // flying ahead, the globe isn't even loaded: those draws are never seen
     ahead(on) { const S = window.GE.scene; S.postProcessStages.fxaa.enabled = !on; S.globe.show = !on; },
@@ -161,7 +170,7 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
     const clocks = []; let t = Date.UTC(2026, 9, 15, 12); // mid-October: long, warm afternoon light
     stops.forEach((p, i) => { const c = sinks(i ? t - 5400000 : t, p); t = i && c - t < 5400000 ? t : c; clocks.push(t); });
     // opening shot: the whole planet, Arizona below
-    GE.time.set(clocks[0]);
+    GE.time.set(clocks[0]); // (and again once the virtual clock starts)
     GE.camera.setView({ destination: C.Cartesian3.fromDegrees(-112, 31, 1.6e7), orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 } });
     return { names: stops.map((p) => p.name), heights, clocks };
   }, SUN_ALT);
@@ -174,6 +183,8 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
     const GE = window.GE, F = window.__film;
     GE.viewer.useDefaultRenderLoop = false; // from here on, the recorder draws every frame itself
     F.start(); F.captions = [];
+    // Cesium's clock moves by the time between draws: one tick on the new clock, then the scene's time of day
+    GE.viewer.clock.tick(); GE.time.set(plan.clocks[0]);
     const show = GE.setCaption;
     GE.setCaption = (eyebrow, text) => { F.captions.push({ t: F.t(), eyebrow: eyebrow || '', text: text || '' }); return show(eyebrow, text); };
     GE.cam.tour({ live: true, quiet: true, heights: plan.heights, clock: (i) => plan.clocks[i] });
@@ -192,7 +203,9 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
       if (n % (fps * 10) === 0) log(`ahead: frame ${n} of ${from} · ${((Date.now() - t0) / n / 1000).toFixed(2)} s per frame · ${st.fetched} tiles fetched, ${st.failed} failed`);
     }
     await page.evaluate(() => window.__film.ahead(false));
-    log(`reached frame ${n} in ${Math.round((Date.now() - t0) / 60000)} min`);
+    // the globe was off while flying ahead, so this view loads from scratch: let it, before the first kept frame
+    const w = await page.evaluate(() => window.__film.settle(600000, false, false));
+    log(`reached frame ${n} in ${Math.round((Date.now() - t0) / 60000)} min; its view took ${Math.round(w.waited / 1000)} s to load`);
   }
   const t1 = Date.now();
   while (!st.done && n < to) {
@@ -211,8 +224,9 @@ export async function film(page, { outDir, fps = 30, seconds = 0, part = [0, 1],
   const captions = await page.evaluate(() => window.__film.captions);
   const kept = Math.max(0, n - from);
   log(`part ${k + 1} of ${N}: filmed ${kept} frames in ${Math.round((Date.now() - t0) / 60000)} min` + (st.done ? ', to the end of the tour' : '') + ` · ${st.fetched} tiles fetched, ${st.failed} failed`
-    + (st.stuck ? ` · ${st.stuck} frames went out with an image still loading` : '') + (low ? ` · ${low} frames with the camera within 25 m of the ground` : ''));
-  return { part: k, of: N, fps, from, frames: kept, done: !!st.done, names: plan.names, heights: plan.heights, captions, first, last, next, low, dir: frames };
+    + (st.stuck ? ` · ${st.stuck} frames went out with an image still loading` : '') + (low ? ` · ${low} frames with the camera within 25 m of the ground` : '')
+    + (st.timeouts ? ` · ${st.timeouts} frames went out before their tiles had all loaded` : ''));
+  return { part: k, of: N, fps, from, frames: kept, done: !!st.done, names: plan.names, heights: plan.heights, captions, first, last, next, low, timeouts: st.timeouts || 0, dir: frames };
 }
 
 // One part's frames, encoded nearly losslessly for --assemble, and what it needs to know about them.
@@ -243,8 +257,9 @@ export function assemble(dir, outDir, log = console.log) {
   const N = parts[0].of, warn = (m) => log(process.env.GITHUB_ACTIONS ? `::warning::${m}` : `warning: ${m}`);
   if (parts.length !== N || parts.some((p, i) => p.part !== i)) throw new Error(`expected ${N} parts, found ${parts.map((p) => p.part).join(', ')}`);
   for (const p of parts) if (JSON.stringify(p.heights) !== JSON.stringify(parts[0].heights)) warn(`part ${p.part + 1} measured different ground heights at the stops, so its camera path differs`);
-  const low = parts.reduce((s, p) => s + (p.low || 0), 0);
+  const low = parts.reduce((s, p) => s + (p.low || 0), 0), soft = parts.reduce((s, p) => s + (p.timeouts || 0), 0);
   if (low) warn(`${low} frames have the camera within 25 m of the ground`);
+  if (soft) warn(`${soft} frames went out before all their tiles had loaded (the network was slow), so they may look soft`);
   for (let i = 1; i < N; i++) {
     const a = parts[i - 1], b = parts[i];
     if (!b.frames) continue; // the tour ended before this part's stretch
