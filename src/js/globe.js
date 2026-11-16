@@ -4,53 +4,117 @@
 const C = Cesium, R = Math.PI / 180;
 
 // ── Terrarium terrain: AWS open elevation tiles (Web Mercator PNG) resampled into Cesium's geographic heightmaps.
-GE.terra = (() => {
-  const MAXZ = 15, LIMIT = GE.isMobile ? 90 : 180, MAX_ACTIVE = 10;
-  const cache = new Map(), order = [], queue = []; let active = 0;
-  const cv = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(256, 256) : Object.assign(document.createElement('canvas'), { width: 256, height: 256 });
-  const cx = cv.getContext('2d', { willReadFrequently: true });
+// Decoding a tile and resampling it takes a few milliseconds each, and an orbit or a flight streams tiles in all
+// the time. So the work runs in a worker where the browser allows it, off the thread that draws the frames.
+// terraCore is that work, written once: the worker runs this same function (from its source text), and the page
+// runs it itself where a worker can't decode images. It must not use anything from outside itself.
+function terraCore(url, LIMIT, MAX_ACTIVE) {
+  const R = Math.PI / 180, clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const cache = new Map(), order = [], queue = []; let active = 0, cx = null;
+  const ctx = () => cx || (cx = (typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(256, 256) : Object.assign(document.createElement('canvas'), { width: 256, height: 256 })).getContext('2d', { willReadFrequently: true }));
   const pump = () => { while (active < MAX_ACTIVE && queue.length) { const job = queue.shift(); active++; job().finally(() => { active--; pump(); }); } };
   const schedule = (fn) => new Promise((res) => { queue.unshift(() => fn().then(res, () => res(null))); pump(); }); // newest first
+  const tileUrl = (z, x, y) => url.replace(/\{(\w+)\}/g, (m, k) => (k === 'z' ? z : k === 'x' ? x : k === 'y' ? y : m));
   function load(z, x, y) {
     const k = z + '/' + x + '/' + y; let p = cache.get(k); if (p) return p;
     p = schedule(async () => {
-      const r = await fetch(GE.fill(GE.CFG.url.terrarium, { z, x, y }), { mode: 'cors' }); if (!r.ok) return null;
-      const img = await createImageBitmap(await r.blob());
-      cx.clearRect(0, 0, 256, 256); cx.drawImage(img, 0, 0); if (img.close) img.close();
-      const d = cx.getImageData(0, 0, 256, 256).data, h = new Float32Array(65536);
+      const r = await fetch(tileUrl(z, x, y), { mode: 'cors' }); if (!r.ok) return null;
+      const img = await createImageBitmap(await r.blob()), g = ctx();
+      g.clearRect(0, 0, 256, 256); g.drawImage(img, 0, 0); if (img.close) img.close();
+      const d = g.getImageData(0, 0, 256, 256).data, h = new Float32Array(65536);
       for (let i = 0, j = 0; i < 65536; i++, j += 4) { const v = d[j] * 256 + d[j + 1] + d[j + 2] / 256 - 32768; h[i] = v < 0 ? 0 : v; } // seafloor -> sea level
       return h;
     });
     cache.set(k, p); order.push(k); if (order.length > LIMIT) cache.delete(order.shift());
     return p;
   }
-  const merc = (W) => ({ x: (lon) => ((lon + 180) / 360) * W, y: (lat) => { const s = Math.sin(GE.clamp(lat, -85.05, 85.05) * R); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * W; } });
+  const merc = (W) => ({ x: (lon) => ((lon + 180) / 360) * W, y: (lat) => { const s = Math.sin(clamp(lat, -85.05, 85.05) * R); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * W; } });
   async function grid(west, north, spanX, spanY, N, z) {
     const W = 256 * (1 << z), T = 1 << z, m = merc(W);
     const gx0 = m.x(west) - 2, gx1 = m.x(west + spanX) + 2, gy0 = Math.max(0, m.y(north) - 2), gy1 = Math.min(W - 1, m.y(north - spanY) + 2);
-    const tiles = new Map(), jobs = [];
-    for (let ty = Math.floor(gy0 / 256); ty <= Math.floor(gy1 / 256); ty++)
-      for (let tx = Math.floor(gx0 / 256); tx <= Math.floor(gx1 / 256); tx++) { const key = tx + ',' + ty; jobs.push(load(z, ((tx % T) + T) % T, ty).then((h) => tiles.set(key, h))); }
+    // the source tiles this grid reads, in a small array (tile column and row from tx0, ty0), not looked up by name per pixel
+    const tx0 = Math.floor(gx0 / 256), ty0 = Math.floor(gy0 / 256), nx = Math.floor(gx1 / 256) - tx0 + 1, ny = Math.floor(gy1 / 256) - ty0 + 1;
+    const tiles = new Array(nx * ny).fill(null), jobs = [];
+    for (let b = 0; b < ny; b++) for (let a = 0; a < nx; a++) jobs.push(load(z, (((tx0 + a) % T) + T) % T, ty0 + b).then((h) => { tiles[b * nx + a] = h; }));
     await Promise.all(jobs);
-    const px = (i, j) => { j = GE.clamp(j, 0, W - 1); const tx = Math.floor(i / 256), ty = Math.floor(j / 256), h = tiles.get(tx + ',' + ty); return h ? h[(j - ty * 256) * 256 + (i - tx * 256)] : 0; };
-    const out = new Float32Array(N * N);
+    const px = (i, j) => {
+      j = clamp(j, 0, W - 1); const tx = Math.floor(i / 256), ty = Math.floor(j / 256), a = tx - tx0, b = ty - ty0;
+      const h = a >= 0 && a < nx && b >= 0 && b < ny ? tiles[b * nx + a] : null;
+      return h ? h[(j - ty * 256) * 256 + (i - tx * 256)] : 0;
+    };
+    const out = new Float32Array(N * N), U = new Float64Array(N);
+    for (let c = 0; c < N; c++) U[c] = m.x(west + (spanX * c) / (N - 1)) - 0.5;
     for (let r = 0; r < N; r++) {
       const v = m.y(north - (spanY * r) / (N - 1)) - 0.5, j = Math.floor(v), fy = v - j;
       for (let c = 0; c < N; c++) {
-        const u = m.x(west + (spanX * c) / (N - 1)) - 0.5, i = Math.floor(u), fx = u - i;
+        const u = U[c], i = Math.floor(u), fx = u - i;
         const a = px(i, j), b = px(i + 1, j), cc = px(i, j + 1), d = px(i + 1, j + 1);
         out[r * N + c] = (a * (1 - fx) + b * fx) * (1 - fy) + (cc * (1 - fx) + d * fx) * fy;
       }
     }
     return out;
   }
+  return { grid };
+}
+GE.terra = (() => {
+  const MAXZ = 15, LIMIT = GE.isMobile ? 90 : 180, MAX_ACTIVE = 10, url = GE.CFG.url.terrarium;
+  let here = null; const local = () => here || (here = terraCore(url, LIMIT, MAX_ACTIVE));
+  let worker = null, ready = false, seq = 0; const waiting = new Map();
+  // anything wrong with the worker (it can't decode images there, or it didn't start): the page does the work, nothing lost
+  const dropWorker = () => { if (!worker) return; try { worker.terminate(); } catch {} worker = null; const w = [...waiting.values()]; waiting.clear(); w.forEach((x) => x.fallback()); };
+  try {
+    if (typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined' && typeof Blob !== 'undefined' && URL.createObjectURL) {
+      // Before any real tile, the worker decodes a two-pixel PNG and checks its colours: a browser that can't do
+      // this work off the main thread says so at once, rather than handing back flat ground.
+      const src = `"use strict";
+const terraCore = ${terraCore.toString()};
+const CHECK = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR42mNo1Glg/iUIAAf3Ajx5NpXhAAAAAElFTkSuQmCC';
+async function check() {
+  const b = Uint8Array.from(atob(CHECK), (c) => c.charCodeAt(0));
+  const img = await createImageBitmap(new Blob([b], { type: 'image/png' }));
+  const g = new OffscreenCanvas(2, 1).getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0); const d = g.getImageData(0, 0, 2, 1).data;
+  return d[0] === 129 && d[1] === 44 && d[2] === 128 && d[4] === 3 && d[5] === 250 && d[6] === 17;
+}
+let T = null, boot = null;
+self.onmessage = async (e) => {
+  const m = e.data;
+  if (m.init) {
+    boot = (async () => { let ok = false; try { ok = await check(); } catch (err) {} if (ok) T = terraCore(m.url, m.limit, m.active); self.postMessage({ ready: ok }); })();
+    return;
+  }
+  await boot;
+  let h = null; if (T) { try { h = await T.grid(m.w, m.n, m.sx, m.sy, m.N, m.z); } catch (err) { h = null; } }
+  if (h) self.postMessage({ id: m.id, h }, [h.buffer]); else self.postMessage({ id: m.id, h: null });
+};`;
+      const srcUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      worker = new Worker(srcUrl);
+      worker.onmessage = (e) => {
+        const d = e.data;
+        if ('ready' in d) { URL.revokeObjectURL(srcUrl); ready = !!d.ready; if (!ready) dropWorker(); return; }
+        const w = waiting.get(d.id); if (!w) return; waiting.delete(d.id);
+        if (d.h) w.done(d.h); else w.fallback();
+      };
+      worker.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); dropWorker(); };
+      worker.postMessage({ init: true, url, limit: LIMIT, active: MAX_ACTIVE });
+    }
+  } catch (e) { worker = null; }
+  const grid = (w, n, sx, sy, N, z) => {
+    if (!worker) return local().grid(w, n, sx, sy, N, z);
+    return new Promise((res) => {
+      const id = ++seq;
+      waiting.set(id, { done: res, fallback: () => res(local().grid(w, n, sx, sy, N, z)) });
+      worker.postMessage({ id, w, n, sx, sy, N, z });
+    });
+  };
   const provider = new C.CustomHeightmapTerrainProvider({
     width: 65, height: 65,
     credit: new C.Credit('Terrain: Mapzen Terrarium · AWS Open Data (USGS, SRTM, GMTED, ETOPO1)'),
     callback: (x, y, level) => { const n = 1 << level, span = 180 / n; return grid(-180 + x * span, 90 - y * span, span, span, 65, Math.min(MAXZ, Math.max(0, level - 1))); },
   });
   async function sample(lon, lat, z = 14) { const g = await grid(lon - 1e-5, lat + 1e-5, 2e-5, 2e-5, 2, z); return g[0]; }
-  return { provider, sample };
+  // offMain: whether tiles are being done in the worker (false before it has answered, and where it can't)
+  return { provider, sample, offMain: () => !!worker && ready };
 })();
 
 GE.initGlobe = function () {

@@ -244,7 +244,9 @@ GE.ui.initPicking = () => {
   h.setInputAction((e) => { mx = e.endPosition.x; my = e.endPosition.y; if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; GE.ui.status(); }); } }, C.ScreenSpaceEventType.MOUSE_MOVE);
   GE.scene.canvas.addEventListener('pointerleave', () => { mx = my = null; GE.ui.status(); });
   GE.ui.status = () => {
-    const el = $('status'); if (!el || getComputedStyle(el).display === 'none') return;
+    // hidden in Creative mode, on tour and while filming: nothing to measure (it picks the ground, which isn't free)
+    const el = $('status'), bc = document.body.classList; if (!el || bc.contains('creative') || bc.contains('touring') || bc.contains('recording')) return;
+    if (getComputedStyle(el).display === 'none') return;
     let ll = null;
     if (mx != null) { const p = GE.camera.pickEllipsoid(new C.Cartesian2(mx, my)); if (p) { const k = C.Cartographic.fromCartesian(p); ll = { lon: k.longitude / R, lat: k.latitude / R, h: GE.scene.globe.getHeight(k) }; } }
     if (!ll) { const c = GE.viewCenter(); if (c) ll = { lon: c.lon, lat: c.lat, h: c.h }; }
@@ -253,14 +255,23 @@ GE.ui.initPicking = () => {
     parts.unshift(`eye <b>${F.dist(eye)}</b>`);
     el.innerHTML = parts.join('<span class="sep">·</span>');
   };
+  // While the camera moves: at most five times a second, and between frames rather than inside one
+  // (Cesium reports camera changes from within its own draw).
+  let stT = 0, stLast = 0;
+  GE.ui.statusSoon = () => { if (stT) return; stT = setTimeout(() => { stT = 0; stLast = performance.now(); GE.ui.status(); }, Math.max(0, 200 - (performance.now() - stLast))); };
+  GE.on('mode', () => GE.ui.status()); // back from Creative: fill it in straight away
+  GE.on('camMode', (m) => { if (!m) GE.ui.status(); }); // and when a tour or an orbit ends
 };
 
 // ── Navigation stack ───────────────────────────────────────
 GE.ui.initNav = () => {
-  const comp = $('compass').firstElementChild;
+  const comp = $('compass').firstElementChild, tilt = $('tiltBtn');
+  // after every frame, but the page is only touched when something shows a change (an orbit turns the compass
+  // a little each frame; the 2D/3D label hardly ever changes, and rewriting it each frame costs a layout)
+  let hdg = NaN, tl = '';
   GE.scene.postRender.addEventListener(() => {
-    comp.style.transform = `rotate(${-GE.camera.heading / R}deg)`;
-    $('tiltBtn').textContent = GE.camera.pitch < -1.2 ? '3D' : '2D';
+    const d = -GE.camera.heading / R; if (!(Math.abs(d - hdg) < 0.05)) { hdg = d; comp.style.transform = `rotate(${d}deg)`; }
+    const t = GE.camera.pitch < -1.2 ? '3D' : '2D'; if (t !== tl) { tl = t; tilt.textContent = t; }
   });
   $('compass').onclick = () => GE.cam.north();
   $('tiltBtn').onclick = () => GE.cam.tilt();
