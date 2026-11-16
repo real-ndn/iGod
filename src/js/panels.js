@@ -80,7 +80,7 @@ GE.ui.initPanels = () => {
     GE.store.set('keys', GE.keys); GE.toast('Keys saved in this browser.');
     if (before.relay !== GE.keys.relay && GE.keys.relay) { GE.prefs.flights = true; GE.savePrefs(); GE.emit('prefs'); GE.live.flights.enable(true); GE.toast('Flight relay saved. Looking for live flights…'); } // try it at once
     if (before.ion !== GE.keys.ion) await GE.applyTerrain();
-    if (before.ion !== GE.keys.ion || before.google !== GE.keys.google) { if (GE.photoreal) { GE.scene.primitives.remove(GE.photoreal); GE.photoreal = null; } GE.emit('needKeysChanged'); if (GE.prefs.base === 'photoreal') GE.setBase('photoreal'); }
+    if (before.ion !== GE.keys.ion || before.google !== GE.keys.google) { if (GE.photoreal) { GE.scene.primitives.remove(GE.photoreal); GE.photoreal = null; } if (GE.prefs.base === 'photoreal') GE.setBase('photoreal'); }
     syncBase(); GE.emit('keys');
   };
   $('kClear').onclick = () => { GE.store.del('keys'); Object.assign(GE.keys, { ion: '', google: '', anthropic: '', firms: '', mapillary: '', relay: '' }); ['kIon', 'kGoogle', 'kAnthropic', 'kFirms', 'kMly', 'kRelay'].forEach((id) => ($(id).value = '')); GE.toast('Keys removed from this browser.'); if (GE.prefs.base === 'photoreal') GE.setBase('satellite'); GE.applyTerrain(); syncBase(); GE.emit('keys'); };
@@ -138,7 +138,12 @@ RB.head = () => {
   o.classList.toggle('live', live);
   const a = Math.abs(off) / 60000, hh = Math.floor(a / 60), mm = Math.round(a % 60);
   o.textContent = live ? 'Live' : GE.time.playing ? 'Playing' : `${off >= 0 ? '+' : '−'}${hh}h ${String(mm).padStart(2, '0')}m`;
-  $('rbPlay').innerHTML = `<svg class="i"><use href="#i-${GE.time.playing ? 'pause' : 'play'}"/></svg>`; $('rbPlay').setAttribute('aria-pressed', !!GE.time.playing);
+  // the icon only changes when play/pause does: replacing it twice a second could swallow a tap on the button
+  const playing = !!GE.time.playing, pb = $('rbPlay');
+  if (pb.dataset.on !== String(playing)) {
+    pb.dataset.on = playing; pb.innerHTML = `<svg class="i"><use href="#i-${playing ? 'pause' : 'play'}"/></svg>`;
+    pb.setAttribute('aria-pressed', playing); pb.setAttribute('aria-label', playing ? 'Pause the day' : 'Play the day');
+  }
   RB.label();
 };
 RB.label = () => {

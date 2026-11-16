@@ -59,7 +59,9 @@ GE.initGlobe = function () {
     animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
     navigationHelpButton: false, fullscreenButton: false, infoBox: false, selectionIndicator: false, vrButton: false,
     creditContainer: 'credits', useBrowserRecommendedResolution: false, requestRenderMode: true, maximumRenderTimeChange: 20,
-    msaaSamples: GE.isMobile ? 1 : 4, // iPad M-series and desktops can afford 4x MSAA orderIndependentTranslucency: false, showRenderLoopErrors: false,
+    msaaSamples: GE.isMobile ? 1 : 4, // iPad M-series and desktops can afford 4x MSAA
+    // no stop-the-world error panel: renderError below turns effects off and keeps the globe drawing
+    orderIndependentTranslucency: false, showRenderLoopErrors: false,
     contextOptions: { webgl: { alpha: false, powerPreference: 'high-performance' } },
   }));
   const s = (GE.scene = v.scene), g = s.globe, cam = (GE.camera = v.camera);

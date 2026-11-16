@@ -76,7 +76,13 @@ H.init = () => {
     } catch (e) { console.warn(e); note.textContent = 'The imagery archive did not answer. Try again in a moment.'; }
   };
   $('tmToday').onclick = () => H.show(null);
-  all.addEventListener('focus', async () => { if (all.options.length > 1) return; try { (await H.load()).forEach((it) => all.add(new Option(it.date, it.rel))); } catch { note.textContent = 'The imagery archive did not answer.'; } }, { once: true });
+  // fill the list the first time it opens; if the archive didn't answer, the next open tries again
+  let filling = false;
+  all.addEventListener('focus', async () => {
+    if (all.options.length > 1 || filling) return; filling = true;
+    try { (await H.load()).forEach((it) => all.add(new Option(it.date, it.rel))); } catch { note.textContent = 'The imagery archive did not answer. Open the list again to retry.'; }
+    filling = false;
+  });
   all.onchange = async () => { const it = (await H.load()).find((i) => String(i.rel) === all.value); H.show(it || null); };
   GE.on('history', mark); GE.on('historyCompare', (on) => $('tmCompare').setAttribute('aria-checked', on));
   $('tmCompare').onclick = () => { if (!H.layer) { note.textContent = 'Pick a date first, then swipe to compare it with today.'; return; } H.setCompare(!H.compare); };

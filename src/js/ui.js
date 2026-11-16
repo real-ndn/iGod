@@ -12,6 +12,7 @@ const usingGoogle = () => GE.prefs.base === 'photoreal' && GE.photoreal && GE.ph
 let gsvc = null;
 const googleSvc = () => gsvc || (gsvc = GE.keys.google ? new C.GoogleGeocoderService({ key: GE.keys.google }) : new C.IonGeocoderService({ scene: GE.scene, accessToken: GE.keys.ion, geocodeProviderType: C.IonGeocodeProviderType.GOOGLE }));
 GE.on('needKeys', () => (gsvc = null));
+GE.on('keys', () => (gsvc = null)); // saved or forgotten keys: the next Google search uses the new ones
 function renderRows(r) {
   rows = r; cursor = r.length ? 0 : -1;
   list.replaceChildren(...r.map((row, i) => {
@@ -80,16 +81,30 @@ GE.ui = { choose };
 
 // ── Card ───────────────────────────────────────────────────
 const card = $('card');
-let cardKey = null;
+let cardKey = null, liveT = 0;
+const webLink = (href) => /^https?:\/\//i.test(String(href || '')); // feed data only ever opens web pages
 function openCard({ kind, kc, title, sub, facts = [], acts = [], coords, links = [], key }) {
+  // A live card (satellite, flight, a place while the clock moves) redraws itself on the same key. It keeps its
+  // buttons and links then, only handing them fresh actions: swapping the elements every second or two dropped
+  // any tap that landed mid-swap.
+  const same = !!key && key === cardKey && !card.hidden;
   cardKey = key || null;
   $('cKind').textContent = kind; $('cKind').style.setProperty('--kc', kc || 'var(--ice)');
   $('cTitle').textContent = title; $('cSub').textContent = sub || '';
   $('cFacts').replaceChildren(...facts.filter(Boolean).map(([k, v, cls, small]) => { const d = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = v; if (cls) dd.className = cls; if (small) { const s = document.createElement('small'); s.textContent = small; dd.append(s); } d.append(dt, dd); return d; }));
-  $('cActs').replaceChildren(...acts.filter(Boolean).map((a) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'pill' + (a.pri ? ' pri' : ''); b.innerHTML = (a.icon ? svg(a.icon) : '') + '<span></span>'; b.lastChild.textContent = a.label; b.onclick = a.fn; return b; }));
+  const acList = acts.filter(Boolean), acBox = $('cActs'), acOld = [...acBox.children];
+  if (same && acOld.length === acList.length && acOld.every((b, i) => b.dataset.label === acList[i].label)) acOld.forEach((b, i) => { b.onclick = acList[i].fn; b.className = 'pill' + (acList[i].pri ? ' pri' : ''); });
+  else acBox.replaceChildren(...acList.map((a) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'pill' + (a.pri ? ' pri' : ''); b.dataset.label = a.label; b.innerHTML = (a.icon ? svg(a.icon) : '') + '<span></span>'; b.lastChild.textContent = a.label; b.onclick = a.fn; return b; }));
   $('cCoords').textContent = coords ? F.ll(coords[0], coords[1]) : ''; $('cCoords').onclick = () => coords && GE.copy(`${coords[0].toFixed(6)}, ${coords[1].toFixed(6)}`, 'Coordinates copied');
-  $('cLinks').replaceChildren(...links.map(([t, href]) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = t + ' ↗'; a.style.marginLeft = '10px'; return a; }));
+  const lnList = links.filter(([, href]) => webLink(href)), lnBox = $('cLinks'), lnOld = [...lnBox.children];
+  if (same && lnOld.length === lnList.length && lnOld.every((a, i) => a.textContent === lnList[i][0] + ' ↗')) lnOld.forEach((a, i) => { if (a.getAttribute('href') !== lnList[i][1]) a.href = lnList[i][1]; });
+  else lnBox.replaceChildren(...lnList.map(([t, href]) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = t + ' ↗'; a.style.marginLeft = '10px'; return a; }));
   card.hidden = false; GE.emit('card', key);
+}
+// one refresh timer for whichever live card is open: opening the same satellite again doesn't stack another
+function liveCard(key, draw, ms) {
+  clearInterval(liveT);
+  liveT = setInterval(() => { if (cardKey !== key || card.hidden) { clearInterval(liveT); liveT = 0; return; } draw(); }, ms);
 }
 GE.ui.closeCard = () => { card.hidden = true; cardKey = null; GE.sel = null; if (GE.pin) GE.pin.show = false; GE.live.sats.select && GE.live.sats.on && GE.live.sats.select(null); GE.emit('sel'); GE.scene.requestRender(); };
 $('cClose').onclick = GE.ui.closeCard;
@@ -168,14 +183,14 @@ GE.ui.showSat = (s, fly) => {
       coords: [st.lat, st.lon], links: [['N2YO', `https://www.n2yo.com/satellite/?s=${s.id}`]] });
   };
   draw(); if (fly) { const st = S.state(s); st && GE.camera.flyTo({ destination: C.Cartesian3.fromDegrees(st.lon, st.lat, st.altKm * 1000 + 3.0e6), duration: 2.6 }); }
-  const k = 'sat' + s.id, iv = setInterval(() => { if (cardKey !== k || card.hidden) return clearInterval(iv); draw(); }, 1000);
+  liveCard('sat' + s.id, draw, 1000);
 };
 GE.ui.showFlight = (f) => {
   GE.sel = null; if (GE.pin) GE.pin.show = false;
   const draw = () => { const p = GE.live.flights.position(f); openCard({ key: 'fl' + f.id, kind: 'Flight · live', kc: 'var(--ice)', title: f.cs, sub: [f.type, f.reg].filter(Boolean).join(' · ') || 'Aircraft',
     facts: [['Altitude', f.alt ? F.elev(f.alt) : 'On ground'], ['Speed', F.speed(f.gs)], ['Heading', Math.round(f.trk) + '° ' + F.dir(f.trk)], f.squawk ? ['Squawk', f.squawk] : null],
     acts: [{ label: 'Follow', icon: 'plane', pri: true, fn: () => GE.cam.follow(f) }], coords: [p.lat, p.lon], links: [[GE.live.flights.name || 'adsb.lol', `https://${(GE.live.flights.name || 'adsb.lol').replace('adsb.fi', 'globe.adsb.fi').replace('airplanes.live', 'globe.airplanes.live')}/?icao=${f.id}`]] }); };
-  draw(); const k = 'fl' + f.id, iv = setInterval(() => { if (cardKey !== k || card.hidden) return clearInterval(iv); draw(); }, 2000);
+  draw(); liveCard('fl' + f.id, draw, 2000);
 };
 GE.ui.showQuake = (g) => {
   GE.sel = { name: g.place, lon: g.lon, lat: g.lat }; GE.emit('sel');

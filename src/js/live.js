@@ -61,7 +61,8 @@ SAT.find = (q) => { q = String(q).toLowerCase(); if (/\biss\b|space station|zary
 SAT.enable = async (on) => {
   SAT.on = on; clearInterval(SAT.timer);
   if (SAT.pts) SAT.pts.show = on; if (SAT.lbl) SAT.lbl.show = on; if (SAT.orbit) SAT.orbit.show = on;
-  if (!on) { GE.scene.requestRender(); return; }
+  // the ISS live-feed fallback belongs to this layer: it goes away (and stops polling) with it
+  if (!on) { if (ISS.on) ISS.enable(false); GE.scene.requestRender(); return; }
   try { SAT.lib = SAT.lib || (await import(GE.CFG.url.satjs)); }
   catch (e) { console.warn(e); GE.toast('Orbit math could not load. Showing the ISS from its live feed.'); return ISS.enable(true); }
   const groups = ['stations', 'visual', 'gps-ops'].concat(GE.prefs.starlink ? ['starlink'] : []);
@@ -83,6 +84,7 @@ SAT.enable = async (on) => {
   }
   if (!SAT.list.length) { GE.toast('Satellite catalog (CelesTrak) is unreachable from this browser. Showing the ISS from its live feed.', 6000); return ISS.enable(true); }
   if (failed) GE.toast(`Some satellite groups did not load (${failed}).`);
+  if (ISS.on && SAT.iss) ISS.enable(false); // the catalog answered this time: one ISS on the globe, not two
   satUpdate(); SAT.timer = setInterval(satUpdate, GE.prefs.starlink ? 2000 : 1000);
   GE.emit('satsReady', SAT.list.length);
 };

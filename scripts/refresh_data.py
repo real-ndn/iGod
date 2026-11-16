@@ -21,6 +21,19 @@ def get(url, timeout=90):
     with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
         return r.read()
 
+def keep_published(name, ok):
+    """Copy data/<name> from the live site into this build, if it's there and looks right."""
+    if not PAGES:
+        return False
+    try:
+        body = get(f'{PAGES}/data/{name}', 60)
+        if ok(body):
+            (DATA / name).write_bytes(body)
+            return True
+    except Exception:
+        pass
+    return False
+
 prev = {}
 if PAGES:
     try: prev = json.loads(get(f'{PAGES}/data/status.json', 20))
@@ -40,6 +53,11 @@ for g in ['stations', 'visual', 'gps-ops', 'starlink']:
             (DATA / f'tle-{g}.txt').write_text(txt)
     except Exception as e:
         status['tle'][g] = {'error': str(e)[:200]}
+        # Each run replaces the whole site, so a failed download would drop this group until CelesTrak
+        # answers again. Keep the copy that's published now instead; its old time means the next run retries.
+        kept = keep_published(f'tle-{g}.txt', lambda b: b'\n1 ' in b)
+        if kept:
+            status['tle'][g] = {**{k: v for k, v in old.items() if k != 'error'}, 'kept': True, 'error': str(e)[:200]}
     time.sleep(1)
 
 key = os.environ.get('FIRMS_MAP_KEY', '').strip()
@@ -61,6 +79,9 @@ if key:
         status['firms'] = {'t': now.isoformat(timespec='seconds'), 'n': len(rows)}
     except Exception as e:
         status['firms'] = {'error': str(e)[:200]}
+        # hotspots from an hour ago beat none; the app shows their age from the file's own time
+        if keep_published('firms.json', lambda b: b'"rows"' in b):
+            status['firms']['kept'] = True
 
 (DATA / 'status.json').write_text(json.dumps(status, indent=1))
 print(json.dumps(status, indent=1))
