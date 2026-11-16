@@ -481,7 +481,7 @@ body.drawing #globe { cursor: crosshair; }
     <div class="row"><span id="rbTime">—</span><span id="rbPlace"></span><span id="rbOff" class="live">Live</span></div>
     <div id="rbTrack" role="slider" tabindex="0" aria-label="Time of day" aria-valuemin="-24" aria-valuemax="24" aria-valuenow="0"><canvas id="rbCanvas"></canvas><span id="rbNow"></span><span id="rbHead"></span></div>
     <div class="row"><div class="rbticks" style="flex:1"><span>−24h</span><span>−12h</span><span>now</span><span>+12h</span><span>+24h</span></div>
-      <button type="button" class="rbtn" id="rbGold" title="Next golden hour here"><svg class="i"><use href="#i-sun"/></svg>Golden</button><button type="button" class="rbtn" id="rbLive">Now</button><button type="button" class="rbtn" id="rbPlay" aria-pressed="false"><svg class="i"><use href="#i-play"/></svg></button></div>
+      <button type="button" class="rbtn" id="rbGold" title="Next golden hour here"><svg class="i"><use href="#i-sun"/></svg>Golden</button><button type="button" class="rbtn" id="rbLive">Now</button><button type="button" class="rbtn" id="rbPlay" aria-pressed="false" aria-label="Play the day"><svg class="i"><use href="#i-play"/></svg></button></div>
   </div>
   <div></div>
 </footer>
@@ -659,53 +659,117 @@ GE.sun = {
 const C = Cesium, R = Math.PI / 180;
 
 // ── Terrarium terrain: AWS open elevation tiles (Web Mercator PNG) resampled into Cesium's geographic heightmaps.
-GE.terra = (() => {
-  const MAXZ = 15, LIMIT = GE.isMobile ? 90 : 180, MAX_ACTIVE = 10;
-  const cache = new Map(), order = [], queue = []; let active = 0;
-  const cv = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(256, 256) : Object.assign(document.createElement('canvas'), { width: 256, height: 256 });
-  const cx = cv.getContext('2d', { willReadFrequently: true });
+// Decoding a tile and resampling it takes a few milliseconds each, and an orbit or a flight streams tiles in all
+// the time. So the work runs in a worker where the browser allows it, off the thread that draws the frames.
+// terraCore is that work, written once: the worker runs this same function (from its source text), and the page
+// runs it itself where a worker can't decode images. It must not use anything from outside itself.
+function terraCore(url, LIMIT, MAX_ACTIVE) {
+  const R = Math.PI / 180, clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const cache = new Map(), order = [], queue = []; let active = 0, cx = null;
+  const ctx = () => cx || (cx = (typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(256, 256) : Object.assign(document.createElement('canvas'), { width: 256, height: 256 })).getContext('2d', { willReadFrequently: true }));
   const pump = () => { while (active < MAX_ACTIVE && queue.length) { const job = queue.shift(); active++; job().finally(() => { active--; pump(); }); } };
   const schedule = (fn) => new Promise((res) => { queue.unshift(() => fn().then(res, () => res(null))); pump(); }); // newest first
+  const tileUrl = (z, x, y) => url.replace(/\{(\w+)\}/g, (m, k) => (k === 'z' ? z : k === 'x' ? x : k === 'y' ? y : m));
   function load(z, x, y) {
     const k = z + '/' + x + '/' + y; let p = cache.get(k); if (p) return p;
     p = schedule(async () => {
-      const r = await fetch(GE.fill(GE.CFG.url.terrarium, { z, x, y }), { mode: 'cors' }); if (!r.ok) return null;
-      const img = await createImageBitmap(await r.blob());
-      cx.clearRect(0, 0, 256, 256); cx.drawImage(img, 0, 0); if (img.close) img.close();
-      const d = cx.getImageData(0, 0, 256, 256).data, h = new Float32Array(65536);
+      const r = await fetch(tileUrl(z, x, y), { mode: 'cors' }); if (!r.ok) return null;
+      const img = await createImageBitmap(await r.blob()), g = ctx();
+      g.clearRect(0, 0, 256, 256); g.drawImage(img, 0, 0); if (img.close) img.close();
+      const d = g.getImageData(0, 0, 256, 256).data, h = new Float32Array(65536);
       for (let i = 0, j = 0; i < 65536; i++, j += 4) { const v = d[j] * 256 + d[j + 1] + d[j + 2] / 256 - 32768; h[i] = v < 0 ? 0 : v; } // seafloor -> sea level
       return h;
     });
     cache.set(k, p); order.push(k); if (order.length > LIMIT) cache.delete(order.shift());
     return p;
   }
-  const merc = (W) => ({ x: (lon) => ((lon + 180) / 360) * W, y: (lat) => { const s = Math.sin(GE.clamp(lat, -85.05, 85.05) * R); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * W; } });
+  const merc = (W) => ({ x: (lon) => ((lon + 180) / 360) * W, y: (lat) => { const s = Math.sin(clamp(lat, -85.05, 85.05) * R); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * W; } });
   async function grid(west, north, spanX, spanY, N, z) {
     const W = 256 * (1 << z), T = 1 << z, m = merc(W);
     const gx0 = m.x(west) - 2, gx1 = m.x(west + spanX) + 2, gy0 = Math.max(0, m.y(north) - 2), gy1 = Math.min(W - 1, m.y(north - spanY) + 2);
-    const tiles = new Map(), jobs = [];
-    for (let ty = Math.floor(gy0 / 256); ty <= Math.floor(gy1 / 256); ty++)
-      for (let tx = Math.floor(gx0 / 256); tx <= Math.floor(gx1 / 256); tx++) { const key = tx + ',' + ty; jobs.push(load(z, ((tx % T) + T) % T, ty).then((h) => tiles.set(key, h))); }
+    // the source tiles this grid reads, in a small array (tile column and row from tx0, ty0), not looked up by name per pixel
+    const tx0 = Math.floor(gx0 / 256), ty0 = Math.floor(gy0 / 256), nx = Math.floor(gx1 / 256) - tx0 + 1, ny = Math.floor(gy1 / 256) - ty0 + 1;
+    const tiles = new Array(nx * ny).fill(null), jobs = [];
+    for (let b = 0; b < ny; b++) for (let a = 0; a < nx; a++) jobs.push(load(z, (((tx0 + a) % T) + T) % T, ty0 + b).then((h) => { tiles[b * nx + a] = h; }));
     await Promise.all(jobs);
-    const px = (i, j) => { j = GE.clamp(j, 0, W - 1); const tx = Math.floor(i / 256), ty = Math.floor(j / 256), h = tiles.get(tx + ',' + ty); return h ? h[(j - ty * 256) * 256 + (i - tx * 256)] : 0; };
-    const out = new Float32Array(N * N);
+    const px = (i, j) => {
+      j = clamp(j, 0, W - 1); const tx = Math.floor(i / 256), ty = Math.floor(j / 256), a = tx - tx0, b = ty - ty0;
+      const h = a >= 0 && a < nx && b >= 0 && b < ny ? tiles[b * nx + a] : null;
+      return h ? h[(j - ty * 256) * 256 + (i - tx * 256)] : 0;
+    };
+    const out = new Float32Array(N * N), U = new Float64Array(N);
+    for (let c = 0; c < N; c++) U[c] = m.x(west + (spanX * c) / (N - 1)) - 0.5;
     for (let r = 0; r < N; r++) {
       const v = m.y(north - (spanY * r) / (N - 1)) - 0.5, j = Math.floor(v), fy = v - j;
       for (let c = 0; c < N; c++) {
-        const u = m.x(west + (spanX * c) / (N - 1)) - 0.5, i = Math.floor(u), fx = u - i;
+        const u = U[c], i = Math.floor(u), fx = u - i;
         const a = px(i, j), b = px(i + 1, j), cc = px(i, j + 1), d = px(i + 1, j + 1);
         out[r * N + c] = (a * (1 - fx) + b * fx) * (1 - fy) + (cc * (1 - fx) + d * fx) * fy;
       }
     }
     return out;
   }
+  return { grid };
+}
+GE.terra = (() => {
+  const MAXZ = 15, LIMIT = GE.isMobile ? 90 : 180, MAX_ACTIVE = 10, url = GE.CFG.url.terrarium;
+  let here = null; const local = () => here || (here = terraCore(url, LIMIT, MAX_ACTIVE));
+  let worker = null, ready = false, seq = 0; const waiting = new Map();
+  // anything wrong with the worker (it can't decode images there, or it didn't start): the page does the work, nothing lost
+  const dropWorker = () => { if (!worker) return; try { worker.terminate(); } catch {} worker = null; const w = [...waiting.values()]; waiting.clear(); w.forEach((x) => x.fallback()); };
+  try {
+    if (typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined' && typeof Blob !== 'undefined' && URL.createObjectURL) {
+      // Before any real tile, the worker decodes a two-pixel PNG and checks its colours: a browser that can't do
+      // this work off the main thread says so at once, rather than handing back flat ground.
+      const src = `"use strict";
+const terraCore = ${terraCore.toString()};
+const CHECK = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR42mNo1Glg/iUIAAf3Ajx5NpXhAAAAAElFTkSuQmCC';
+async function check() {
+  const b = Uint8Array.from(atob(CHECK), (c) => c.charCodeAt(0));
+  const img = await createImageBitmap(new Blob([b], { type: 'image/png' }));
+  const g = new OffscreenCanvas(2, 1).getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0); const d = g.getImageData(0, 0, 2, 1).data;
+  return d[0] === 129 && d[1] === 44 && d[2] === 128 && d[4] === 3 && d[5] === 250 && d[6] === 17;
+}
+let T = null, boot = null;
+self.onmessage = async (e) => {
+  const m = e.data;
+  if (m.init) {
+    boot = (async () => { let ok = false; try { ok = await check(); } catch (err) {} if (ok) T = terraCore(m.url, m.limit, m.active); self.postMessage({ ready: ok }); })();
+    return;
+  }
+  await boot;
+  let h = null; if (T) { try { h = await T.grid(m.w, m.n, m.sx, m.sy, m.N, m.z); } catch (err) { h = null; } }
+  if (h) self.postMessage({ id: m.id, h }, [h.buffer]); else self.postMessage({ id: m.id, h: null });
+};`;
+      const srcUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      worker = new Worker(srcUrl);
+      worker.onmessage = (e) => {
+        const d = e.data;
+        if ('ready' in d) { URL.revokeObjectURL(srcUrl); ready = !!d.ready; if (!ready) dropWorker(); return; }
+        const w = waiting.get(d.id); if (!w) return; waiting.delete(d.id);
+        if (d.h) w.done(d.h); else w.fallback();
+      };
+      worker.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); dropWorker(); };
+      worker.postMessage({ init: true, url, limit: LIMIT, active: MAX_ACTIVE });
+    }
+  } catch (e) { worker = null; }
+  const grid = (w, n, sx, sy, N, z) => {
+    if (!worker) return local().grid(w, n, sx, sy, N, z);
+    return new Promise((res) => {
+      const id = ++seq;
+      waiting.set(id, { done: res, fallback: () => res(local().grid(w, n, sx, sy, N, z)) });
+      worker.postMessage({ id, w, n, sx, sy, N, z });
+    });
+  };
   const provider = new C.CustomHeightmapTerrainProvider({
     width: 65, height: 65,
     credit: new C.Credit('Terrain: Mapzen Terrarium · AWS Open Data (USGS, SRTM, GMTED, ETOPO1)'),
     callback: (x, y, level) => { const n = 1 << level, span = 180 / n; return grid(-180 + x * span, 90 - y * span, span, span, 65, Math.min(MAXZ, Math.max(0, level - 1))); },
   });
   async function sample(lon, lat, z = 14) { const g = await grid(lon - 1e-5, lat + 1e-5, 2e-5, 2e-5, 2, z); return g[0]; }
-  return { provider, sample };
+  // offMain: whether tiles are being done in the worker (false before it has answered, and where it can't)
+  return { provider, sample, offMain: () => !!worker && ready };
 })();
 
 GE.initGlobe = function () {
@@ -714,7 +778,9 @@ GE.initGlobe = function () {
     animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
     navigationHelpButton: false, fullscreenButton: false, infoBox: false, selectionIndicator: false, vrButton: false,
     creditContainer: 'credits', useBrowserRecommendedResolution: false, requestRenderMode: true, maximumRenderTimeChange: 20,
-    msaaSamples: GE.isMobile ? 1 : 4, // iPad M-series and desktops can afford 4x MSAA orderIndependentTranslucency: false, showRenderLoopErrors: false,
+    msaaSamples: GE.isMobile ? 1 : 4, // iPad M-series and desktops can afford 4x MSAA
+    // no stop-the-world error panel: renderError below turns effects off and keeps the globe drawing
+    orderIndependentTranslucency: false, showRenderLoopErrors: false,
     contextOptions: { webgl: { alpha: false, powerPreference: 'high-performance' } },
   }));
   const s = (GE.scene = v.scene), g = s.globe, cam = (GE.camera = v.camera);
@@ -1038,18 +1104,34 @@ function satState(s, ms = GE.time.now()) {
   return { pos: new C.Cartesian3(e.x * 1000, e.y * 1000, e.z * 1000), lat: g.latitude / R, lon: g.longitude / R, altKm: g.height, speed: Math.hypot(v.x, v.y, v.z) * 1000, period: (2 * Math.PI) / s.rec.no, inc: s.rec.inclo / R };
 }
 SAT.state = satState;
+// A big catalog (Starlink adds thousands) is worked out a slice per frame, about 3 ms each, every satellite for the
+// same moment. Done in one go, it held the page up long enough to jolt an orbit every couple of seconds.
+let satJob = null;
 function satUpdate() {
   if (!SAT.on || !SAT.lib) return;
-  const lib = SAT.lib, d = new Date(GE.time.now()), gmst = lib.gstime(d);
-  for (const s of SAT.list) {
-    const pv = lib.propagate(s.rec, d);
-    if (!pv || !pv.position || typeof pv.position !== 'object') { s.pt.show = false; continue; }
-    const e = lib.eciToEcf(pv.position, gmst); scratch.x = e.x * 1000; scratch.y = e.y * 1000; scratch.z = e.z * 1000;
-    s.pt.position = scratch; s.pt.show = true; if (s.lb) s.lb.position = scratch;
+  if (satJob) { satJob.again = true; return; } // one at a time: once it's through, another for the moment it is then
+  const lib = SAT.lib, d = new Date(GE.time.now());
+  satJob = { lib, d, gmst: lib.gstime(d), list: SAT.list.slice(), i: 0, again: false };
+  satSlice();
+}
+function satSlice() {
+  const j = satJob; if (!j) return;
+  if (!SAT.on || SAT.lib !== j.lib) { satJob = null; return; }
+  const { lib, d, gmst, list } = j, t0 = performance.now(), big = list.length > 1500;
+  while (j.i < list.length) {
+    const s = list[j.i++], pv = lib.propagate(s.rec, d);
+    if (!pv || !pv.position || typeof pv.position !== 'object') s.pt.show = false;
+    else {
+      const e = lib.eciToEcf(pv.position, gmst); scratch.x = e.x * 1000; scratch.y = e.y * 1000; scratch.z = e.z * 1000;
+      s.pt.position = scratch; s.pt.show = true; if (s.lb) s.lb.position = scratch;
+    }
+    if (big && (j.i & 63) === 0 && performance.now() - t0 > 3) { requestAnimationFrame(satSlice); return; }
   }
+  satJob = null;
   // redraw the orbit ring every 20 s, and at once when the clock jumps, so it always runs through the satellite
   const sel = SAT.sel; if (sel && sel.orbitAt && (Date.now() - sel.orbitAt > 20000 || Math.abs(GE.time.now() - sel.orbitT) > 60000)) drawOrbit(sel);
   GE.scene.requestRender(); GE.emit('sats');
+  if (j.again) requestAnimationFrame(satUpdate);
 }
 function drawOrbit(s) {
   if (!SAT.orbit) SAT.orbit = GE.scene.primitives.add(new C.PolylineCollection());
@@ -1064,7 +1146,8 @@ SAT.find = (q) => { q = String(q).toLowerCase(); if (/\biss\b|space station|zary
 SAT.enable = async (on) => {
   SAT.on = on; clearInterval(SAT.timer);
   if (SAT.pts) SAT.pts.show = on; if (SAT.lbl) SAT.lbl.show = on; if (SAT.orbit) SAT.orbit.show = on;
-  if (!on) { GE.scene.requestRender(); return; }
+  // the ISS live-feed fallback belongs to this layer: it goes away (and stops polling) with it
+  if (!on) { if (ISS.on) ISS.enable(false); GE.scene.requestRender(); return; }
   try { SAT.lib = SAT.lib || (await import(GE.CFG.url.satjs)); }
   catch (e) { console.warn(e); GE.toast('Orbit math could not load. Showing the ISS from its live feed.'); return ISS.enable(true); }
   const groups = ['stations', 'visual', 'gps-ops'].concat(GE.prefs.starlink ? ['starlink'] : []);
@@ -1086,6 +1169,7 @@ SAT.enable = async (on) => {
   }
   if (!SAT.list.length) { GE.toast('Satellite catalog (CelesTrak) is unreachable from this browser. Showing the ISS from its live feed.', 6000); return ISS.enable(true); }
   if (failed) GE.toast(`Some satellite groups did not load (${failed}).`);
+  if (ISS.on && SAT.iss) ISS.enable(false); // the catalog answered this time: one ISS on the globe, not two
   satUpdate(); SAT.timer = setInterval(satUpdate, GE.prefs.starlink ? 2000 : 1000);
   GE.emit('satsReady', SAT.list.length);
 };
@@ -1328,10 +1412,16 @@ const DATA = JSON.parse(document.getElementById('geData').textContent);
 const F = GE.fmt;
 
 // ── borders: vector lines rasterized per tile ─────────────
+// Points are kept in Web Mercator (0 to 1 across the world), worked out once here, so drawing a tile
+// only scales and shifts them: no sine or logarithm per point per tile while the map streams in.
 const lines = DATA.borders.a.map((row) => {
-  const pts = new Float64Array(row.length - 1); let x = 0, y = 0, w = 999, s = 999, e = -999, n = -999;
-  for (let i = 1; i < row.length; i += 2) { x += row[i]; y += row[i + 1]; const lo = x / 1000, la = y / 1000; pts[i - 1] = lo; pts[i] = la; if (lo < w) w = lo; if (lo > e) e = lo; if (la < s) s = la; if (la > n) n = la; }
-  return { kind: row[0], pts, w, s, e, n };
+  const m = new Float64Array(row.length - 1); let x = 0, y = 0, w = 999, s = 999, e = -999, n = -999;
+  for (let i = 1; i < row.length; i += 2) {
+    x += row[i]; y += row[i + 1]; const lo = x / 1000, la = y / 1000, sn = Math.sin(GE.clamp(la, -85.05, 85.05) * R);
+    m[i - 1] = (lo + 180) / 360; m[i] = 0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI);
+    if (lo < w) w = lo; if (lo > e) e = lo; if (la < s) s = la; if (la > n) n = la;
+  }
+  return { kind: row[0], m, w, s, e, n };
 });
 const CELL = 6, grid = new Map();
 lines.forEach((l, idx) => { for (let cx = Math.floor(l.w / CELL); cx <= Math.floor(l.e / CELL); cx++) for (let cy = Math.floor(l.s / CELL); cy <= Math.floor(l.n / CELL); cy++) { const k = cx + ',' + cy; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(idx); } });
@@ -1349,15 +1439,21 @@ BorderProvider.prototype.requestImage = function (x, y, level) {
   const r = this.tilingScheme.tileXYToRectangle(x, y, level), w = r.west / R, s = r.south / R, e = r.east / R, n = r.north / R, pad = (e - w) * 0.03;
   const set = linesIn(w - pad, s - pad, e + pad, n + pad); if (!set.size) return Promise.resolve(empty);
   const cv = document.createElement('canvas'); cv.width = cv.height = 512; const g = cv.getContext('2d');
-  const N = 2 ** level, px = (lon) => (((lon + 180) / 360) * N - x) * 512;
-  const py = (lat) => { const sn = Math.sin(GE.clamp(lat, -85.05, 85.05) * R); return ((0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI)) * N - y) * 512; };
+  const N = 2 ** level, M = 12; // a segment wholly past one edge, by more than the widest line, can't touch this tile
   g.lineJoin = 'round'; g.lineCap = 'round';
   const base = level < 3 ? 1.1 : level < 6 ? 1.7 : level < 10 ? 2.4 : 3;
   for (const pass of [0, 1]) for (const l of set) {
     if (l.kind === 2 && level < 3) continue;
-    const st = l.kind === 2, disputed = l.kind === 1;
-    g.beginPath(); let prev = null;
-    for (let i = 0; i < l.pts.length; i += 2) { const lo = l.pts[i], X = px(lo), Y = py(l.pts[i + 1]); if (prev === null || Math.abs(lo - prev) > 180) g.moveTo(X, Y); else g.lineTo(X, Y); prev = lo; }
+    const st = l.kind === 2, disputed = l.kind === 1, solid = pass === 0 || !(st || disputed); // dashed lines keep every segment, so the dashes line up across tiles
+    g.beginPath();
+    const q = l.m; let X0 = 0, Y0 = 0, prev = -9, pen = false;
+    for (let i = 0; i < q.length; i += 2) {
+      const X = (q[i] * N - x) * 512, Y = (q[i + 1] * N - y) * 512;
+      if (Math.abs(q[i] - prev) > 0.5) pen = false; // the first point, or across the antimeridian: lift the pen
+      else if (solid && ((X < -M && X0 < -M) || (X > 512 + M && X0 > 512 + M) || (Y < -M && Y0 < -M) || (Y > 512 + M && Y0 > 512 + M))) pen = false;
+      else { if (!pen) g.moveTo(X0, Y0); g.lineTo(X, Y); pen = true; }
+      X0 = X; Y0 = Y; prev = q[i];
+    }
     if (pass === 0) { g.setLineDash([]); g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = (st ? base * 0.8 : base) + (level < 4 ? 1.4 : 2.2); }
     else { g.setLineDash(st ? [5, 6] : disputed ? [9, 7] : []); g.strokeStyle = st ? 'rgba(236,241,248,.55)' : disputed ? 'rgba(245,184,98,.85)' : 'rgba(250,247,240,.88)'; g.lineWidth = st ? base * 0.8 : base; }
     g.stroke();
@@ -1404,7 +1500,10 @@ LB.init = () => {
   LB.borders = new C.ImageryLayer(new BorderProvider()); GE.viewer.imageryLayers.add(LB.borders); // add() returns nothing
   LB.borders.show = GE.prefs.borders;
   let pending = false, last = 0;
-  const kick = () => { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; const t = performance.now(); if (t - last < 120) return setTimeout(kick, 130); last = t; LB.update(); }); };
+  // Labels ride with the globe on the GPU every frame; this only picks which names show. While the app itself
+  // flies the camera (orbit, tour, dive), choosing four times a second is plenty and leaves the frames alone.
+  // (Filming lays labels out itself, before every frame, so it keeps the old pace here.)
+  const kick = () => { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; const t = performance.now(), gap = GE.cam && GE.cam.mode && !GE.recording ? 240 : 120; if (t - last < gap) return setTimeout(kick, gap + 10); last = t; LB.update(); }); };
   GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(() => setTimeout(LB.update, 30));
   addEventListener('resize', kick); document.fonts && document.fonts.ready.then(() => { wcache.clear(); LB.update(); });
   GE.on('prefs', () => { if (LB.borders) LB.borders.show = GE.prefs.borders; });
@@ -1422,10 +1521,18 @@ LB.update = () => {
     let w = -180, so = -90, ea = 180, no = 90; if (rect) { w = rect.west / R; so = rect.south / R; ea = rect.east / R; no = rect.north / R; }
     const wraps = ea < w, boxes = [], MAX = GE.isMobile ? 70 : 150;
     const inView = (e) => !(e.lat < so || e.lat > no || (wraps ? e.lon < w && e.lon > ea : e.lon < w || e.lon > ea));
+    // Terrain heights are looked up a couple of dozen at a time and fall due at staggered times. All due together,
+    // every name on screen looked up its height in the same frame every 4 s, a hitch you could see mid-orbit.
+    let reseat = GE.recording ? Infinity : 24;
     const onGround = (e) => { // close to the ground, lift labels onto the terrain so they sit on the right spot when tilted
       if (camH >= 4e5) return e.pos;
       // filming re-seats every draw, so a label sits on the terrain that finished loading for that frame
-      const now = performance.now(); if (!e.hp || now - e.ht > (GE.recording ? -1 : 4000)) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } }
+      const now = performance.now();
+      if (!e.hp || (now - e.ht > (GE.recording ? -1 : 4000) && reseat > 0)) {
+        reseat--;
+        const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null;
+        if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = GE.recording ? now : now - Math.random() * 1500; }
+      }
       return e.hp || e.pos;
     };
     // live layers claim their space first, nearest first, and only once you're regional (no wall of text from orbit)
@@ -1568,7 +1675,13 @@ H.init = () => {
     } catch (e) { console.warn(e); note.textContent = 'The imagery archive did not answer. Try again in a moment.'; }
   };
   $('tmToday').onclick = () => H.show(null);
-  all.addEventListener('focus', async () => { if (all.options.length > 1) return; try { (await H.load()).forEach((it) => all.add(new Option(it.date, it.rel))); } catch { note.textContent = 'The imagery archive did not answer.'; } }, { once: true });
+  // fill the list the first time it opens; if the archive didn't answer, the next open tries again
+  let filling = false;
+  all.addEventListener('focus', async () => {
+    if (all.options.length > 1 || filling) return; filling = true;
+    try { (await H.load()).forEach((it) => all.add(new Option(it.date, it.rel))); } catch { note.textContent = 'The imagery archive did not answer. Open the list again to retry.'; }
+    filling = false;
+  });
   all.onchange = async () => { const it = (await H.load()).find((i) => String(i.rel) === all.value); H.show(it || null); };
   GE.on('history', mark); GE.on('historyCompare', (on) => $('tmCompare').setAttribute('aria-checked', on));
   $('tmCompare').onclick = () => { if (!H.layer) { note.textContent = 'Pick a date first, then swipe to compare it with today.'; return; } H.setCompare(!H.compare); };
@@ -1715,15 +1828,52 @@ const below = (margin = 70) => {
 const wait = (ms) => new Promise((r) => (K.timer = setTimeout(r, ms)));
 GE.setCaption = (eyebrow, text) => { const el = GE.$('caption'); el.innerHTML = ''; if (!text) return; const s = document.createElement('small'); s.textContent = eyebrow || ''; el.append(s, document.createTextNode(text)); };
 
+// Frame pacing for the app's own camera moves. Ultra, the default, draws every pixel of the screen with 4x MSAA;
+// some iPads can't do that sixty times a second while the view keeps turning, and a smooth orbit looks better
+// than a sharp one that stutters. So while the app moves the camera (orbit, tour, dive, the rides), if frames keep
+// coming slower than about 50 a second, the picture is drawn a step softer, never softer than Standard detail,
+// and it's back to full sharpness the moment the move ends. A step that doesn't speed things up is taken back
+// straight away (a frame-rate cap such as Low Power Mode, or a device busy with something else), so nothing is
+// given up for nothing. Detail changed by hand during a move is left as it was set. Never while filming.
+const PACE = (K.pace = { on: false, done: true, base: 1, cur: 1, prev: 1, floor: 1, before: 0, last: 0, d: [] });
+const paceStart = () => {
+  const v = GE.viewer; if (PACE.on || !v || GE.recording) return;
+  const r = v.resolutionScale;
+  Object.assign(PACE, { on: true, base: r, cur: r, prev: r, floor: Math.max(0.5, 1 / (window.devicePixelRatio || 1)), before: 0, d: [] });
+  PACE.done = !(r > PACE.floor + 1e-3); // already at Standard's resolution: nothing to give
+};
+const paceEnd = () => {
+  if (!PACE.on) return; PACE.on = false; PACE.done = true; const v = GE.viewer;
+  if (v && PACE.cur !== PACE.base && v.resolutionScale === PACE.cur) { v.resolutionScale = PACE.base; GE.scene.requestRender(); }
+};
+const paceFrame = () => {
+  const now = performance.now(), dt = now - PACE.last; PACE.last = now;
+  if (!PACE.on || PACE.done) return;
+  const v = GE.viewer;
+  if (GE.recording || v.resolutionScale !== PACE.cur) { PACE.done = true; return; } // filming began, or Detail was changed by hand
+  if (dt > 100) return; // not drawing continuously just now (or a one-off hitch, which resolution can't help)
+  PACE.d.push(dt); if (PACE.d.length < 45) return; // about 3/4 s of frames
+  const med = PACE.d.sort((a, b) => a - b)[22]; PACE.d.length = 0;
+  if (PACE.before) {
+    const helped = med < PACE.before * 0.9; PACE.before = 0;
+    if (!helped) { v.resolutionScale = PACE.cur = PACE.prev; PACE.done = true; GE.scene.requestRender(); return; }
+  }
+  if (med > 20 && PACE.cur > PACE.floor + 1e-3) {
+    PACE.prev = PACE.cur; PACE.before = med;
+    let next = PACE.cur * 0.8; if (next < PACE.floor * 1.12) next = PACE.floor; // no last sliver of a step: too small to tell if it helped
+    v.resolutionScale = PACE.cur = next; GE.scene.requestRender();
+  }
+};
 K.stop = () => {
-  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer); K.flying = false;
+  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer); K.flying = false; paceEnd();
   const was = K.mode; K.mode = null;
   try { cam().lookAtTransform(C.Matrix4.IDENTITY); } catch {}
   document.body.classList.remove('touring'); GE.setCaption();
   if (was) GE.emit('camMode', null);
 };
-K.set = (mode) => { K.mode = mode; GE.emit('camMode', mode); };
+K.set = (mode) => { K.mode = mode; if (mode) paceStart(); GE.emit('camMode', mode); };
 K.init = () => {
+  GE.scene.postRender.addEventListener(paceFrame);
   const h = new C.ScreenSpaceEventHandler(GE.scene.canvas);
   const interrupt = () => { if (K.mode) K.stop(); };
   for (const t of [C.ScreenSpaceEventType.LEFT_DOWN, C.ScreenSpaceEventType.RIGHT_DOWN, C.ScreenSpaceEventType.MIDDLE_DOWN, C.ScreenSpaceEventType.WHEEL, C.ScreenSpaceEventType.PINCH_START]) h.setInputAction(interrupt, t);
@@ -2031,6 +2181,7 @@ const usingGoogle = () => GE.prefs.base === 'photoreal' && GE.photoreal && GE.ph
 let gsvc = null;
 const googleSvc = () => gsvc || (gsvc = GE.keys.google ? new C.GoogleGeocoderService({ key: GE.keys.google }) : new C.IonGeocoderService({ scene: GE.scene, accessToken: GE.keys.ion, geocodeProviderType: C.IonGeocodeProviderType.GOOGLE }));
 GE.on('needKeys', () => (gsvc = null));
+GE.on('keys', () => (gsvc = null)); // saved or forgotten keys: the next Google search uses the new ones
 function renderRows(r) {
   rows = r; cursor = r.length ? 0 : -1;
   list.replaceChildren(...r.map((row, i) => {
@@ -2099,16 +2250,30 @@ GE.ui = { choose };
 
 // ── Card ───────────────────────────────────────────────────
 const card = $('card');
-let cardKey = null;
+let cardKey = null, liveT = 0;
+const webLink = (href) => /^https?:\/\//i.test(String(href || '')); // feed data only ever opens web pages
 function openCard({ kind, kc, title, sub, facts = [], acts = [], coords, links = [], key }) {
+  // A live card (satellite, flight, a place while the clock moves) redraws itself on the same key. It keeps its
+  // buttons and links then, only handing them fresh actions: swapping the elements every second or two dropped
+  // any tap that landed mid-swap.
+  const same = !!key && key === cardKey && !card.hidden;
   cardKey = key || null;
   $('cKind').textContent = kind; $('cKind').style.setProperty('--kc', kc || 'var(--ice)');
   $('cTitle').textContent = title; $('cSub').textContent = sub || '';
   $('cFacts').replaceChildren(...facts.filter(Boolean).map(([k, v, cls, small]) => { const d = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = v; if (cls) dd.className = cls; if (small) { const s = document.createElement('small'); s.textContent = small; dd.append(s); } d.append(dt, dd); return d; }));
-  $('cActs').replaceChildren(...acts.filter(Boolean).map((a) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'pill' + (a.pri ? ' pri' : ''); b.innerHTML = (a.icon ? svg(a.icon) : '') + '<span></span>'; b.lastChild.textContent = a.label; b.onclick = a.fn; return b; }));
+  const acList = acts.filter(Boolean), acBox = $('cActs'), acOld = [...acBox.children];
+  if (same && acOld.length === acList.length && acOld.every((b, i) => b.dataset.label === acList[i].label)) acOld.forEach((b, i) => { b.onclick = acList[i].fn; b.className = 'pill' + (acList[i].pri ? ' pri' : ''); });
+  else acBox.replaceChildren(...acList.map((a) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'pill' + (a.pri ? ' pri' : ''); b.dataset.label = a.label; b.innerHTML = (a.icon ? svg(a.icon) : '') + '<span></span>'; b.lastChild.textContent = a.label; b.onclick = a.fn; return b; }));
   $('cCoords').textContent = coords ? F.ll(coords[0], coords[1]) : ''; $('cCoords').onclick = () => coords && GE.copy(`${coords[0].toFixed(6)}, ${coords[1].toFixed(6)}`, 'Coordinates copied');
-  $('cLinks').replaceChildren(...links.map(([t, href]) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = t + ' ↗'; a.style.marginLeft = '10px'; return a; }));
+  const lnList = links.filter(([, href]) => webLink(href)), lnBox = $('cLinks'), lnOld = [...lnBox.children];
+  if (same && lnOld.length === lnList.length && lnOld.every((a, i) => a.textContent === lnList[i][0] + ' ↗')) lnOld.forEach((a, i) => { if (a.getAttribute('href') !== lnList[i][1]) a.href = lnList[i][1]; });
+  else lnBox.replaceChildren(...lnList.map(([t, href]) => { const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = t + ' ↗'; a.style.marginLeft = '10px'; return a; }));
   card.hidden = false; GE.emit('card', key);
+}
+// one refresh timer for whichever live card is open: opening the same satellite again doesn't stack another
+function liveCard(key, draw, ms) {
+  clearInterval(liveT);
+  liveT = setInterval(() => { if (cardKey !== key || card.hidden) { clearInterval(liveT); liveT = 0; return; } draw(); }, ms);
 }
 GE.ui.closeCard = () => { card.hidden = true; cardKey = null; GE.sel = null; if (GE.pin) GE.pin.show = false; GE.live.sats.select && GE.live.sats.on && GE.live.sats.select(null); GE.emit('sel'); GE.scene.requestRender(); };
 $('cClose').onclick = GE.ui.closeCard;
@@ -2187,14 +2352,14 @@ GE.ui.showSat = (s, fly) => {
       coords: [st.lat, st.lon], links: [['N2YO', `https://www.n2yo.com/satellite/?s=${s.id}`]] });
   };
   draw(); if (fly) { const st = S.state(s); st && GE.camera.flyTo({ destination: C.Cartesian3.fromDegrees(st.lon, st.lat, st.altKm * 1000 + 3.0e6), duration: 2.6 }); }
-  const k = 'sat' + s.id, iv = setInterval(() => { if (cardKey !== k || card.hidden) return clearInterval(iv); draw(); }, 1000);
+  liveCard('sat' + s.id, draw, 1000);
 };
 GE.ui.showFlight = (f) => {
   GE.sel = null; if (GE.pin) GE.pin.show = false;
   const draw = () => { const p = GE.live.flights.position(f); openCard({ key: 'fl' + f.id, kind: 'Flight · live', kc: 'var(--ice)', title: f.cs, sub: [f.type, f.reg].filter(Boolean).join(' · ') || 'Aircraft',
     facts: [['Altitude', f.alt ? F.elev(f.alt) : 'On ground'], ['Speed', F.speed(f.gs)], ['Heading', Math.round(f.trk) + '° ' + F.dir(f.trk)], f.squawk ? ['Squawk', f.squawk] : null],
     acts: [{ label: 'Follow', icon: 'plane', pri: true, fn: () => GE.cam.follow(f) }], coords: [p.lat, p.lon], links: [[GE.live.flights.name || 'adsb.lol', `https://${(GE.live.flights.name || 'adsb.lol').replace('adsb.fi', 'globe.adsb.fi').replace('airplanes.live', 'globe.airplanes.live')}/?icao=${f.id}`]] }); };
-  draw(); const k = 'fl' + f.id, iv = setInterval(() => { if (cardKey !== k || card.hidden) return clearInterval(iv); draw(); }, 2000);
+  draw(); liveCard('fl' + f.id, draw, 2000);
 };
 GE.ui.showQuake = (g) => {
   GE.sel = { name: g.place, lon: g.lon, lat: g.lat }; GE.emit('sel');
@@ -2248,7 +2413,9 @@ GE.ui.initPicking = () => {
   h.setInputAction((e) => { mx = e.endPosition.x; my = e.endPosition.y; if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; GE.ui.status(); }); } }, C.ScreenSpaceEventType.MOUSE_MOVE);
   GE.scene.canvas.addEventListener('pointerleave', () => { mx = my = null; GE.ui.status(); });
   GE.ui.status = () => {
-    const el = $('status'); if (!el || getComputedStyle(el).display === 'none') return;
+    // hidden in Creative mode, on tour and while filming: nothing to measure (it picks the ground, which isn't free)
+    const el = $('status'), bc = document.body.classList; if (!el || bc.contains('creative') || bc.contains('touring') || bc.contains('recording')) return;
+    if (getComputedStyle(el).display === 'none') return;
     let ll = null;
     if (mx != null) { const p = GE.camera.pickEllipsoid(new C.Cartesian2(mx, my)); if (p) { const k = C.Cartographic.fromCartesian(p); ll = { lon: k.longitude / R, lat: k.latitude / R, h: GE.scene.globe.getHeight(k) }; } }
     if (!ll) { const c = GE.viewCenter(); if (c) ll = { lon: c.lon, lat: c.lat, h: c.h }; }
@@ -2257,14 +2424,23 @@ GE.ui.initPicking = () => {
     parts.unshift(`eye <b>${F.dist(eye)}</b>`);
     el.innerHTML = parts.join('<span class="sep">·</span>');
   };
+  // While the camera moves: at most five times a second, and between frames rather than inside one
+  // (Cesium reports camera changes from within its own draw).
+  let stT = 0, stLast = 0;
+  GE.ui.statusSoon = () => { if (stT) return; stT = setTimeout(() => { stT = 0; stLast = performance.now(); GE.ui.status(); }, Math.max(0, 200 - (performance.now() - stLast))); };
+  GE.on('mode', () => GE.ui.status()); // back from Creative: fill it in straight away
+  GE.on('camMode', (m) => { if (!m) GE.ui.status(); }); // and when a tour or an orbit ends
 };
 
 // ── Navigation stack ───────────────────────────────────────
 GE.ui.initNav = () => {
-  const comp = $('compass').firstElementChild;
+  const comp = $('compass').firstElementChild, tilt = $('tiltBtn');
+  // after every frame, but the page is only touched when something shows a change (an orbit turns the compass
+  // a little each frame; the 2D/3D label hardly ever changes, and rewriting it each frame costs a layout)
+  let hdg = NaN, tl = '';
   GE.scene.postRender.addEventListener(() => {
-    comp.style.transform = `rotate(${-GE.camera.heading / R}deg)`;
-    $('tiltBtn').textContent = GE.camera.pitch < -1.2 ? '3D' : '2D';
+    const d = -GE.camera.heading / R; if (!(Math.abs(d - hdg) < 0.05)) { hdg = d; comp.style.transform = `rotate(${d}deg)`; }
+    const t = GE.camera.pitch < -1.2 ? '3D' : '2D'; if (t !== tl) { tl = t; tilt.textContent = t; }
   });
   $('compass').onclick = () => GE.cam.north();
   $('tiltBtn').onclick = () => GE.cam.tilt();
@@ -2422,7 +2598,7 @@ GE.ui.initPanels = () => {
     GE.store.set('keys', GE.keys); GE.toast('Keys saved in this browser.');
     if (before.relay !== GE.keys.relay && GE.keys.relay) { GE.prefs.flights = true; GE.savePrefs(); GE.emit('prefs'); GE.live.flights.enable(true); GE.toast('Flight relay saved. Looking for live flights…'); } // try it at once
     if (before.ion !== GE.keys.ion) await GE.applyTerrain();
-    if (before.ion !== GE.keys.ion || before.google !== GE.keys.google) { if (GE.photoreal) { GE.scene.primitives.remove(GE.photoreal); GE.photoreal = null; } GE.emit('needKeysChanged'); if (GE.prefs.base === 'photoreal') GE.setBase('photoreal'); }
+    if (before.ion !== GE.keys.ion || before.google !== GE.keys.google) { if (GE.photoreal) { GE.scene.primitives.remove(GE.photoreal); GE.photoreal = null; } if (GE.prefs.base === 'photoreal') GE.setBase('photoreal'); }
     syncBase(); GE.emit('keys');
   };
   $('kClear').onclick = () => { GE.store.del('keys'); Object.assign(GE.keys, { ion: '', google: '', anthropic: '', firms: '', mapillary: '', relay: '' }); ['kIon', 'kGoogle', 'kAnthropic', 'kFirms', 'kMly', 'kRelay'].forEach((id) => ($(id).value = '')); GE.toast('Keys removed from this browser.'); if (GE.prefs.base === 'photoreal') GE.setBase('satellite'); GE.applyTerrain(); syncBase(); GE.emit('keys'); };
@@ -2480,7 +2656,12 @@ RB.head = () => {
   o.classList.toggle('live', live);
   const a = Math.abs(off) / 60000, hh = Math.floor(a / 60), mm = Math.round(a % 60);
   o.textContent = live ? 'Live' : GE.time.playing ? 'Playing' : `${off >= 0 ? '+' : '−'}${hh}h ${String(mm).padStart(2, '0')}m`;
-  $('rbPlay').innerHTML = `<svg class="i"><use href="#i-${GE.time.playing ? 'pause' : 'play'}"/></svg>`; $('rbPlay').setAttribute('aria-pressed', !!GE.time.playing);
+  // the icon only changes when play/pause does: replacing it twice a second could swallow a tap on the button
+  const playing = !!GE.time.playing, pb = $('rbPlay');
+  if (pb.dataset.on !== String(playing)) {
+    pb.dataset.on = playing; pb.innerHTML = `<svg class="i"><use href="#i-${playing ? 'pause' : 'play'}"/></svg>`;
+    pb.setAttribute('aria-pressed', playing); pb.setAttribute('aria-label', playing ? 'Pause the day' : 'Play the day');
+  }
   RB.label();
 };
 RB.label = () => {
@@ -2614,7 +2795,7 @@ function timeTo(moment, p = centerOrSel()) {
 }
 const LAYERS = { sats: /satellite|sats\b/, starlink: /starlink/, flights: /flight|plane|aircraft|adsb|air traffic/, quakes: /earthquake|quake|seismic/, fires: /hotspot|firms|wildfire|\bfires?\b/, events: /volcano|storm|hurricane|natural event|\bevents?\b/, borders: /border/, labels: /label|place name|names/, roads: /road|street|highway/, terrain: /terrain|relief|mountain/, lights: /city light|night light|lights/, shadows: /shadow/, buildings: /building/, sunEverywhere: /sunlight everywhere|real sun/ };
 async function setLayer(k, on) {
-  if (!(k in GE.prefs)) throw new Error('Unknown layer ' + k);
+  if (!(k in LAYERS)) throw new Error('Unknown layer ' + k); // only layers: never mode, base, units or detail
   GE.prefs[k] = on; GE.savePrefs(); GE.emit('prefs');
   const map = { sats: () => GE.live.sats.enable(on), flights: () => GE.live.flights.enable(on), quakes: () => GE.live.quakes.enable(on), events: () => GE.live.events.enable(on), labels: () => GE.labels.enable(on), borders: () => (GE.labels.borders.show = on), fires: () => GE.live.fires.enable(on), roads: () => (GE.L.roads.show = on), terrain: () => GE.applyTerrain(), lights: () => GE.applyLights(), shadows: () => GE.applyShadows(), buildings: () => GE.applyBuildings(), sunEverywhere: () => GE.applySunEverywhere(), starlink: () => GE.live.sats.on && GE.live.sats.enable(true) };
   await (map[k] || (() => 0))(); GE.scene.requestRender();
@@ -2697,7 +2878,7 @@ const TOOLS = [
   { name: 'fly_to', description: 'Fly the camera to a place anywhere on Earth, by name or by lat/lon. range_m is the distance from the target: 300 street, 2500 neighborhood, 25000 city, 400000 region, 8000000 continent. pitch_deg: -90 straight down, -15 near the horizon.', input_schema: { type: 'object', properties: { query: { type: 'string' }, lat: { type: 'number' }, lon: { type: 'number' }, range_m: { type: 'number' }, pitch_deg: { type: 'number' }, heading_deg: { type: 'number' } } } },
   { name: 'search_places', description: 'Look up places by name. Returns up to 5 matches with coordinates.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
   { name: 'describe_view', description: 'What the camera sees now: center coordinates, place name, altitude, local sun, simulated time, layers, selection.', input_schema: { type: 'object', properties: {} } },
-  { name: 'set_layer', description: 'Turn a layer on or off. One of: labels, roads, terrain, lights, sunEverywhere, shadows, buildings, sats, starlink, flights, quakes, events.', input_schema: { type: 'object', properties: { layer: { type: 'string' }, on: { type: 'boolean' } }, required: ['layer', 'on'] } },
+  { name: 'set_layer', description: 'Turn a layer on or off. One of: labels, borders, roads, terrain, lights, sunEverywhere, shadows, buildings, sats, starlink, flights, quakes, fires (NASA wildfire hotspots), events (volcanoes, storms, big fires).', input_schema: { type: 'object', properties: { layer: { type: 'string', enum: ['labels', 'borders', 'roads', 'terrain', 'lights', 'sunEverywhere', 'shadows', 'buildings', 'sats', 'starlink', 'flights', 'quakes', 'fires', 'events'] }, on: { type: 'boolean' } }, required: ['layer', 'on'] } },
   { name: 'set_base', description: 'Earth imagery: satellite (sharp aerial), daily (NASA mosaic of one day; pass date YYYY-MM-DD), photoreal (Google 3D cities, needs a key), night (Earth at night).', input_schema: { type: 'object', properties: { base: { type: 'string', enum: ['satellite', 'daily', 'photoreal', 'night'] }, date: { type: 'string' } }, required: ['base'] } },
   { name: 'set_time', description: 'Move the clock that drives the sun: hours_from_now between -24 and 24, or a moment at the current place.', input_schema: { type: 'object', properties: { hours_from_now: { type: 'number' }, moment: { type: 'string', enum: ['now', 'golden_hour', 'sunset', 'sunrise', 'solar_noon', 'night'] } } } },
   { name: 'set_vision', description: 'Visual filter for the whole view.', input_schema: { type: 'object', properties: { mode: { type: 'string', enum: ['normal', 'nv', 'thermal', 'mono', 'cinema'] } }, required: ['mode'] } },
@@ -2800,7 +2981,7 @@ GE.milo.greet = () => milo.show(GE.keys.anthropic ? "I'm Milo, thinking with Cla
   GE.ribbon.init();
   GE.tourFilm.init();
   GE.camera.moveEnd.addEventListener(() => { GE.ui.writeHash(); GE.ui.status(); });
-  GE.camera.changed.addEventListener(() => GE.ui.status());
+  GE.camera.changed.addEventListener(() => GE.ui.statusSoon());
 
   let done = false;
   const finish = () => {

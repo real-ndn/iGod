@@ -35,18 +35,34 @@ function satState(s, ms = GE.time.now()) {
   return { pos: new C.Cartesian3(e.x * 1000, e.y * 1000, e.z * 1000), lat: g.latitude / R, lon: g.longitude / R, altKm: g.height, speed: Math.hypot(v.x, v.y, v.z) * 1000, period: (2 * Math.PI) / s.rec.no, inc: s.rec.inclo / R };
 }
 SAT.state = satState;
+// A big catalog (Starlink adds thousands) is worked out a slice per frame, about 3 ms each, every satellite for the
+// same moment. Done in one go, it held the page up long enough to jolt an orbit every couple of seconds.
+let satJob = null;
 function satUpdate() {
   if (!SAT.on || !SAT.lib) return;
-  const lib = SAT.lib, d = new Date(GE.time.now()), gmst = lib.gstime(d);
-  for (const s of SAT.list) {
-    const pv = lib.propagate(s.rec, d);
-    if (!pv || !pv.position || typeof pv.position !== 'object') { s.pt.show = false; continue; }
-    const e = lib.eciToEcf(pv.position, gmst); scratch.x = e.x * 1000; scratch.y = e.y * 1000; scratch.z = e.z * 1000;
-    s.pt.position = scratch; s.pt.show = true; if (s.lb) s.lb.position = scratch;
+  if (satJob) { satJob.again = true; return; } // one at a time: once it's through, another for the moment it is then
+  const lib = SAT.lib, d = new Date(GE.time.now());
+  satJob = { lib, d, gmst: lib.gstime(d), list: SAT.list.slice(), i: 0, again: false };
+  satSlice();
+}
+function satSlice() {
+  const j = satJob; if (!j) return;
+  if (!SAT.on || SAT.lib !== j.lib) { satJob = null; return; }
+  const { lib, d, gmst, list } = j, t0 = performance.now(), big = list.length > 1500;
+  while (j.i < list.length) {
+    const s = list[j.i++], pv = lib.propagate(s.rec, d);
+    if (!pv || !pv.position || typeof pv.position !== 'object') s.pt.show = false;
+    else {
+      const e = lib.eciToEcf(pv.position, gmst); scratch.x = e.x * 1000; scratch.y = e.y * 1000; scratch.z = e.z * 1000;
+      s.pt.position = scratch; s.pt.show = true; if (s.lb) s.lb.position = scratch;
+    }
+    if (big && (j.i & 63) === 0 && performance.now() - t0 > 3) { requestAnimationFrame(satSlice); return; }
   }
+  satJob = null;
   // redraw the orbit ring every 20 s, and at once when the clock jumps, so it always runs through the satellite
   const sel = SAT.sel; if (sel && sel.orbitAt && (Date.now() - sel.orbitAt > 20000 || Math.abs(GE.time.now() - sel.orbitT) > 60000)) drawOrbit(sel);
   GE.scene.requestRender(); GE.emit('sats');
+  if (j.again) requestAnimationFrame(satUpdate);
 }
 function drawOrbit(s) {
   if (!SAT.orbit) SAT.orbit = GE.scene.primitives.add(new C.PolylineCollection());
@@ -61,7 +77,8 @@ SAT.find = (q) => { q = String(q).toLowerCase(); if (/\biss\b|space station|zary
 SAT.enable = async (on) => {
   SAT.on = on; clearInterval(SAT.timer);
   if (SAT.pts) SAT.pts.show = on; if (SAT.lbl) SAT.lbl.show = on; if (SAT.orbit) SAT.orbit.show = on;
-  if (!on) { GE.scene.requestRender(); return; }
+  // the ISS live-feed fallback belongs to this layer: it goes away (and stops polling) with it
+  if (!on) { if (ISS.on) ISS.enable(false); GE.scene.requestRender(); return; }
   try { SAT.lib = SAT.lib || (await import(GE.CFG.url.satjs)); }
   catch (e) { console.warn(e); GE.toast('Orbit math could not load. Showing the ISS from its live feed.'); return ISS.enable(true); }
   const groups = ['stations', 'visual', 'gps-ops'].concat(GE.prefs.starlink ? ['starlink'] : []);
@@ -83,6 +100,7 @@ SAT.enable = async (on) => {
   }
   if (!SAT.list.length) { GE.toast('Satellite catalog (CelesTrak) is unreachable from this browser. Showing the ISS from its live feed.', 6000); return ISS.enable(true); }
   if (failed) GE.toast(`Some satellite groups did not load (${failed}).`);
+  if (ISS.on && SAT.iss) ISS.enable(false); // the catalog answered this time: one ISS on the globe, not two
   satUpdate(); SAT.timer = setInterval(satUpdate, GE.prefs.starlink ? 2000 : 1000);
   GE.emit('satsReady', SAT.list.length);
 };

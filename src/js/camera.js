@@ -23,15 +23,52 @@ const below = (margin = 70) => {
 const wait = (ms) => new Promise((r) => (K.timer = setTimeout(r, ms)));
 GE.setCaption = (eyebrow, text) => { const el = GE.$('caption'); el.innerHTML = ''; if (!text) return; const s = document.createElement('small'); s.textContent = eyebrow || ''; el.append(s, document.createTextNode(text)); };
 
+// Frame pacing for the app's own camera moves. Ultra, the default, draws every pixel of the screen with 4x MSAA;
+// some iPads can't do that sixty times a second while the view keeps turning, and a smooth orbit looks better
+// than a sharp one that stutters. So while the app moves the camera (orbit, tour, dive, the rides), if frames keep
+// coming slower than about 50 a second, the picture is drawn a step softer, never softer than Standard detail,
+// and it's back to full sharpness the moment the move ends. A step that doesn't speed things up is taken back
+// straight away (a frame-rate cap such as Low Power Mode, or a device busy with something else), so nothing is
+// given up for nothing. Detail changed by hand during a move is left as it was set. Never while filming.
+const PACE = (K.pace = { on: false, done: true, base: 1, cur: 1, prev: 1, floor: 1, before: 0, last: 0, d: [] });
+const paceStart = () => {
+  const v = GE.viewer; if (PACE.on || !v || GE.recording) return;
+  const r = v.resolutionScale;
+  Object.assign(PACE, { on: true, base: r, cur: r, prev: r, floor: Math.max(0.5, 1 / (window.devicePixelRatio || 1)), before: 0, d: [] });
+  PACE.done = !(r > PACE.floor + 1e-3); // already at Standard's resolution: nothing to give
+};
+const paceEnd = () => {
+  if (!PACE.on) return; PACE.on = false; PACE.done = true; const v = GE.viewer;
+  if (v && PACE.cur !== PACE.base && v.resolutionScale === PACE.cur) { v.resolutionScale = PACE.base; GE.scene.requestRender(); }
+};
+const paceFrame = () => {
+  const now = performance.now(), dt = now - PACE.last; PACE.last = now;
+  if (!PACE.on || PACE.done) return;
+  const v = GE.viewer;
+  if (GE.recording || v.resolutionScale !== PACE.cur) { PACE.done = true; return; } // filming began, or Detail was changed by hand
+  if (dt > 100) return; // not drawing continuously just now (or a one-off hitch, which resolution can't help)
+  PACE.d.push(dt); if (PACE.d.length < 45) return; // about 3/4 s of frames
+  const med = PACE.d.sort((a, b) => a - b)[22]; PACE.d.length = 0;
+  if (PACE.before) {
+    const helped = med < PACE.before * 0.9; PACE.before = 0;
+    if (!helped) { v.resolutionScale = PACE.cur = PACE.prev; PACE.done = true; GE.scene.requestRender(); return; }
+  }
+  if (med > 20 && PACE.cur > PACE.floor + 1e-3) {
+    PACE.prev = PACE.cur; PACE.before = med;
+    let next = PACE.cur * 0.8; if (next < PACE.floor * 1.12) next = PACE.floor; // no last sliver of a step: too small to tell if it helped
+    v.resolutionScale = PACE.cur = next; GE.scene.requestRender();
+  }
+};
 K.stop = () => {
-  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer); K.flying = false;
+  cancelAnimationFrame(raf); raf = 0; clearTimeout(K.timer); K.flying = false; paceEnd();
   const was = K.mode; K.mode = null;
   try { cam().lookAtTransform(C.Matrix4.IDENTITY); } catch {}
   document.body.classList.remove('touring'); GE.setCaption();
   if (was) GE.emit('camMode', null);
 };
-K.set = (mode) => { K.mode = mode; GE.emit('camMode', mode); };
+K.set = (mode) => { K.mode = mode; if (mode) paceStart(); GE.emit('camMode', mode); };
 K.init = () => {
+  GE.scene.postRender.addEventListener(paceFrame);
   const h = new C.ScreenSpaceEventHandler(GE.scene.canvas);
   const interrupt = () => { if (K.mode) K.stop(); };
   for (const t of [C.ScreenSpaceEventType.LEFT_DOWN, C.ScreenSpaceEventType.RIGHT_DOWN, C.ScreenSpaceEventType.MIDDLE_DOWN, C.ScreenSpaceEventType.WHEEL, C.ScreenSpaceEventType.PINCH_START]) h.setInputAction(interrupt, t);

@@ -26,7 +26,7 @@
   GE.ribbon.init();
   GE.tourFilm.init();
   GE.camera.moveEnd.addEventListener(() => { GE.ui.writeHash(); GE.ui.status(); });
-  GE.camera.changed.addEventListener(() => GE.ui.status());
+  GE.camera.changed.addEventListener(() => GE.ui.statusSoon());
 
   let done = false;
   const finish = () => {

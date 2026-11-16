@@ -7,10 +7,16 @@ const DATA = JSON.parse(document.getElementById('geData').textContent);
 const F = GE.fmt;
 
 // ── borders: vector lines rasterized per tile ─────────────
+// Points are kept in Web Mercator (0 to 1 across the world), worked out once here, so drawing a tile
+// only scales and shifts them: no sine or logarithm per point per tile while the map streams in.
 const lines = DATA.borders.a.map((row) => {
-  const pts = new Float64Array(row.length - 1); let x = 0, y = 0, w = 999, s = 999, e = -999, n = -999;
-  for (let i = 1; i < row.length; i += 2) { x += row[i]; y += row[i + 1]; const lo = x / 1000, la = y / 1000; pts[i - 1] = lo; pts[i] = la; if (lo < w) w = lo; if (lo > e) e = lo; if (la < s) s = la; if (la > n) n = la; }
-  return { kind: row[0], pts, w, s, e, n };
+  const m = new Float64Array(row.length - 1); let x = 0, y = 0, w = 999, s = 999, e = -999, n = -999;
+  for (let i = 1; i < row.length; i += 2) {
+    x += row[i]; y += row[i + 1]; const lo = x / 1000, la = y / 1000, sn = Math.sin(GE.clamp(la, -85.05, 85.05) * R);
+    m[i - 1] = (lo + 180) / 360; m[i] = 0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI);
+    if (lo < w) w = lo; if (lo > e) e = lo; if (la < s) s = la; if (la > n) n = la;
+  }
+  return { kind: row[0], m, w, s, e, n };
 });
 const CELL = 6, grid = new Map();
 lines.forEach((l, idx) => { for (let cx = Math.floor(l.w / CELL); cx <= Math.floor(l.e / CELL); cx++) for (let cy = Math.floor(l.s / CELL); cy <= Math.floor(l.n / CELL); cy++) { const k = cx + ',' + cy; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(idx); } });
@@ -28,15 +34,21 @@ BorderProvider.prototype.requestImage = function (x, y, level) {
   const r = this.tilingScheme.tileXYToRectangle(x, y, level), w = r.west / R, s = r.south / R, e = r.east / R, n = r.north / R, pad = (e - w) * 0.03;
   const set = linesIn(w - pad, s - pad, e + pad, n + pad); if (!set.size) return Promise.resolve(empty);
   const cv = document.createElement('canvas'); cv.width = cv.height = 512; const g = cv.getContext('2d');
-  const N = 2 ** level, px = (lon) => (((lon + 180) / 360) * N - x) * 512;
-  const py = (lat) => { const sn = Math.sin(GE.clamp(lat, -85.05, 85.05) * R); return ((0.5 - Math.log((1 + sn) / (1 - sn)) / (4 * Math.PI)) * N - y) * 512; };
+  const N = 2 ** level, M = 12; // a segment wholly past one edge, by more than the widest line, can't touch this tile
   g.lineJoin = 'round'; g.lineCap = 'round';
   const base = level < 3 ? 1.1 : level < 6 ? 1.7 : level < 10 ? 2.4 : 3;
   for (const pass of [0, 1]) for (const l of set) {
     if (l.kind === 2 && level < 3) continue;
-    const st = l.kind === 2, disputed = l.kind === 1;
-    g.beginPath(); let prev = null;
-    for (let i = 0; i < l.pts.length; i += 2) { const lo = l.pts[i], X = px(lo), Y = py(l.pts[i + 1]); if (prev === null || Math.abs(lo - prev) > 180) g.moveTo(X, Y); else g.lineTo(X, Y); prev = lo; }
+    const st = l.kind === 2, disputed = l.kind === 1, solid = pass === 0 || !(st || disputed); // dashed lines keep every segment, so the dashes line up across tiles
+    g.beginPath();
+    const q = l.m; let X0 = 0, Y0 = 0, prev = -9, pen = false;
+    for (let i = 0; i < q.length; i += 2) {
+      const X = (q[i] * N - x) * 512, Y = (q[i + 1] * N - y) * 512;
+      if (Math.abs(q[i] - prev) > 0.5) pen = false; // the first point, or across the antimeridian: lift the pen
+      else if (solid && ((X < -M && X0 < -M) || (X > 512 + M && X0 > 512 + M) || (Y < -M && Y0 < -M) || (Y > 512 + M && Y0 > 512 + M))) pen = false;
+      else { if (!pen) g.moveTo(X0, Y0); g.lineTo(X, Y); pen = true; }
+      X0 = X; Y0 = Y; prev = q[i];
+    }
     if (pass === 0) { g.setLineDash([]); g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = (st ? base * 0.8 : base) + (level < 4 ? 1.4 : 2.2); }
     else { g.setLineDash(st ? [5, 6] : disputed ? [9, 7] : []); g.strokeStyle = st ? 'rgba(236,241,248,.55)' : disputed ? 'rgba(245,184,98,.85)' : 'rgba(250,247,240,.88)'; g.lineWidth = st ? base * 0.8 : base; }
     g.stroke();
@@ -83,7 +95,10 @@ LB.init = () => {
   LB.borders = new C.ImageryLayer(new BorderProvider()); GE.viewer.imageryLayers.add(LB.borders); // add() returns nothing
   LB.borders.show = GE.prefs.borders;
   let pending = false, last = 0;
-  const kick = () => { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; const t = performance.now(); if (t - last < 120) return setTimeout(kick, 130); last = t; LB.update(); }); };
+  // Labels ride with the globe on the GPU every frame; this only picks which names show. While the app itself
+  // flies the camera (orbit, tour, dive), choosing four times a second is plenty and leaves the frames alone.
+  // (Filming lays labels out itself, before every frame, so it keeps the old pace here.)
+  const kick = () => { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; const t = performance.now(), gap = GE.cam && GE.cam.mode && !GE.recording ? 240 : 120; if (t - last < gap) return setTimeout(kick, gap + 10); last = t; LB.update(); }); };
   GE.camera.changed.addEventListener(kick); GE.camera.moveEnd.addEventListener(() => setTimeout(LB.update, 30));
   addEventListener('resize', kick); document.fonts && document.fonts.ready.then(() => { wcache.clear(); LB.update(); });
   GE.on('prefs', () => { if (LB.borders) LB.borders.show = GE.prefs.borders; });
@@ -101,10 +116,18 @@ LB.update = () => {
     let w = -180, so = -90, ea = 180, no = 90; if (rect) { w = rect.west / R; so = rect.south / R; ea = rect.east / R; no = rect.north / R; }
     const wraps = ea < w, boxes = [], MAX = GE.isMobile ? 70 : 150;
     const inView = (e) => !(e.lat < so || e.lat > no || (wraps ? e.lon < w && e.lon > ea : e.lon < w || e.lon > ea));
+    // Terrain heights are looked up a couple of dozen at a time and fall due at staggered times. All due together,
+    // every name on screen looked up its height in the same frame every 4 s, a hitch you could see mid-orbit.
+    let reseat = GE.recording ? Infinity : 24;
     const onGround = (e) => { // close to the ground, lift labels onto the terrain so they sit on the right spot when tilted
       if (camH >= 4e5) return e.pos;
       // filming re-seats every draw, so a label sits on the terrain that finished loading for that frame
-      const now = performance.now(); if (!e.hp || now - e.ht > (GE.recording ? -1 : 4000)) { const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null; if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = now; } }
+      const now = performance.now();
+      if (!e.hp || (now - e.ht > (GE.recording ? -1 : 4000) && reseat > 0)) {
+        reseat--;
+        const hh = s.globe.show ? s.globe.getHeight(C.Cartographic.fromDegrees(e.lon, e.lat)) : null;
+        if (hh != null) { e.hp = C.Cartesian3.fromDegrees(e.lon, e.lat, hh * (s.verticalExaggeration || 1) + 12); e.ht = GE.recording ? now : now - Math.random() * 1500; }
+      }
       return e.hp || e.pos;
     };
     // live layers claim their space first, nearest first, and only once you're regional (no wall of text from orbit)
