@@ -1,0 +1,70 @@
+{
+ "v": 1,
+ "file": "tour.mp4",
+ "poster": "poster.jpg",
+ "fps": 30,
+ "width": 1920,
+ "height": 1280,
+ "frames": 3715,
+ "duration": 123.833,
+ "recorded": "2026-11-13T17:11:48.588Z",
+ "light": "sun 12° above the horizon at each stop",
+ "chapters": [
+  {
+   "t": 0,
+   "name": "Old Town Cottonwood",
+   "eyebrow": "1 / 8 · Verde Valley, Arizona",
+   "text": "Home. Old Town Cottonwood, where the Verde River runs through red-rock country."
+  },
+  {
+   "t": 13.567,
+   "name": "Jerome",
+   "eyebrow": "2 / 8 · Cleopatra Hill, Arizona",
+   "text": "Jerome. A copper town hanging off Cleopatra Hill, a mile above the valley floor."
+  },
+  {
+   "t": 28.1,
+   "name": "Cathedral Rock",
+   "eyebrow": "3 / 8 · Sedona, Arizona",
+   "text": "Cathedral Rock. Sedona sandstone at its most theatrical."
+  },
+  {
+   "t": 42.633,
+   "name": "Grand Canyon",
+   "eyebrow": "4 / 8 · Mather Point, Arizona",
+   "text": "The Grand Canyon. A mile deep, and two billion years of rock on the walls."
+  },
+  {
+   "t": 57.167,
+   "name": "Horseshoe Bend",
+   "eyebrow": "5 / 8 · Page, Arizona",
+   "text": "Horseshoe Bend, where the Colorado River turns back on itself."
+  },
+  {
+   "t": 71.7,
+   "name": "Mount Everest",
+   "eyebrow": "6 / 8 · Nepal and China",
+   "text": "Everest. Eight thousand eight hundred and forty-nine meters, the top of the world."
+  },
+  {
+   "t": 90.233,
+   "name": "Matterhorn",
+   "eyebrow": "7 / 8 · Switzerland and Italy",
+   "text": "The Matterhorn, carved into a pyramid by four glaciers."
+  },
+  {
+   "t": 107.233,
+   "name": "Manhattan",
+   "eyebrow": "8 / 8 · New York City",
+   "text": "Manhattan. Eight million people on a granite island."
+  }
+ ],
+ "end": {
+  "lon": -74.00066316177222,
+  "lat": 40.71831277225903,
+  "height": 2457.4919512721835,
+  "heading": 0.282735204007202,
+  "pitch": -0.4894120805938722,
+  "roll": 6.283184866052381
+ }
+}
